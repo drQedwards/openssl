@@ -61,19 +61,22 @@ Linking and Loading Considerations
 Because of how the NonStop Common Runtime Environment (CRE) works, there are
 restrictions on how programs can link and load with OpenSSL libraries.
 On current NonStop platforms, programs cannot both statically link OpenSSL
-libraries and dynamically load OpenSSL shared libraries concurrently. If this
-is done, there is a high probability of encountering a SIGSEGV condition
-relating to `atexit()` processing when a shared library is unloaded and when
-the program terminates. This limitation applies to all OpenSSL shared library
-components.
+libraries and dynamically load OpenSSL shared libraries concurrently. Doing so
+may cause issues when a shared library is unloaded before the global destructor
+runs.
 
-A control has been added as of 3.3.x to disable calls to `atexit()` within the
-`libcrypto` builds (specifically in `crypto/init.c`). This switch can be
-controlled using `disable-atexit` or `enable-atexit`, and is disabled by default
-for NonStop builds. If you need to have `atexit()` functionality, set
-`enabled-atexit` when configuring OpenSSL to enable the `atexit()` call to
-register `OPENSSL_cleanup()` automatically. Preferably, you can explicitly call
-`OPENSSL_cleanup()` from your application.
+By default, OpenSSL shared libraries are pinned in memory on NonStop. This
+ensures `OPENSSL_cleanup()` runs reliably via the global destructor (or via the
+`OPENSSL_ATEXIT_CLEANUP` environment variable on platforms that register cleanup
+on library unload).
+
+The `no-pinshared` configure option can be used to disable pinning if earlier
+unloading of the libraries is required. Note that cleanup may not occur if the
+library is unloaded before the destructor runs.
+
+The `no-atexit` option is enabled by default for NonStop builds (as `atexit()`
+semantics are problematic on this platform). Applications should preferably
+call `OPENSSL_cleanup()` explicitly when appropriate.
 
 Secure Memory
 -------------
@@ -188,75 +191,3 @@ the following variables. The following set of compiler defines are required:
 
     DBGFLAG="--debug"
     CIPHENABLES="enable-weak-ssl-ciphers enable-rc4"
-
-### Internal Known TNS/X to TNS/E Cross Compile Variables
-
-The following definition is required if you are building on TNS/X for TNS/E
-and have access to a TNS/E machine on your EXPAND network - with an example
-node named `\CS3`:
-
-    SYSTEMLIBS="-L/E/cs3/usr/local/lib"
-
-Version Procedure (VPROC) Considerations
-----------------------------------------
-
-If you require a VPROC entry for platform version identification, use the
-following variables:
-
-### For Itanium
-
-    OPENSSL_VPROC_PREFIX=T0085H06
-
-### For x86
-
-    OPENSSL_VPROC_PREFIX=T0085L01
-
-### Common Definition
-
-    export OPENSSL_VPROC=${OPENSSL_VPROC_PREFIX}_$(
-        . VERSION.dat
-        if [ -n "$PRE_RELEASE_TAG" ]; then
-            PRE_RELEASE_TAG="-$PRE_RELEASE_TAG"
-        fi
-        if [ -n "$BUILD_METADATA" ]; then
-            BUILD_METADATA="+$BUILD_METADATA"
-        fi
-        echo "$MAJOR.$MINOR.$PATCH$PRE_RELEASE_TAG$BUILD_METADATA" |\
-            sed -e 's/[-.+]/_/g'
-        )
-
-Example Configure Targets
--------------------------
-
-For OSS targets, the main DLL names will be `libssl.so` and `libcrypto.so`.
-The following assumes that your PWD is set according to your installation
-standards.
-
-    ./Configure nonstop-nsx           --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nsx_put       --prefix=${PWD} \
-        --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nsx_64        --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nsx_64_put    --prefix=${PWD} \
-        --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-
-    ./Configure nonstop-nse           --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nse_g         --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nse_put       --prefix=${PWD} \
-        --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nse_64        --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nse_64_put    --prefix=${PWD} \
-        --openssldir=${PWD}/ssl threads "-D_REENTRANT"
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
