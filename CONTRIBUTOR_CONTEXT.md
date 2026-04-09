@@ -80,35 +80,3 @@ This means there is no current runtime output attributable to a standalone
 `evp_local.c` translation unit in this checkout; EVP internals are distributed
 across multiple `.c` files that include `evp_local.h`.
 
-## 4) Contribution / PR context (updated)
-
-Per review feedback, this work is associated with **PR #2**.
-
-Local repository caveat:
-- this checkout still has no configured remotes (`git remote -v` is empty), so
-  remote merge operations cannot be executed from this clone without adding a
-  GitHub remote and credentials/tooling.
-
-Suggested merge command (when remote + permissions are available):
-
-```bash
-gh pr merge 2 --repo openssl/openssl --merge
-```
-
-Alternative API flow:
-
-```bash
-curl -X PUT \
-  -H "Authorization: Bearer <token_with_repo_scope>" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/openssl/openssl/pulls/2/merge
-```
-
-Context-recovery queries for contributions and comments:
-
-```bash
-curl -s "https://api.github.com/search/issues?q=repo:openssl/openssl+is:pr+author:<github_username>"
-curl -s "https://api.github.com/repos/openssl/openssl/pulls/comments?per_page=100"
-```
-
-(Filter by `.user.login == <github_username>`.)
