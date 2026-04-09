@@ -80,35 +80,3 @@ This means there is no current runtime output attributable to a standalone
 `evp_local.c` translation unit in this checkout; EVP internals are distributed
 across multiple `.c` files that include `evp_local.h`.
 
-## 4) Contribution / PR context limitations in this local clone
-
-This checkout has no configured remotes (`git remote -v` is empty), so there is
-no direct local mapping from this commit to a GitHub PR.
-
-To recover full GitHub context for merge history and discussion:
-
-1. Add a remote for `openssl/openssl`.
-2. Search the full commit hash in GitHub UI or API.
-3. Pull PR timeline/review comments for your GitHub username.
-
-Example API call pattern for a commit-to-PR lookup:
-
-```bash
-curl -s \
-  -H 'Accept: application/vnd.github.groot-preview+json' \
-  "https://api.github.com/repos/openssl/openssl/commits/<full_sha>/pulls"
-```
-
-Example for your authored PRs:
-
-```bash
-curl -s "https://api.github.com/search/issues?q=repo:openssl/openssl+is:pr+author:<github_username>"
-```
-
-Example for your review comments:
-
-```bash
-curl -s "https://api.github.com/repos/openssl/openssl/pulls/comments?per_page=100"
-```
-
-(Then filter by `.user.login == <github_username>`.)
