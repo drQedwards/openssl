@@ -6,7 +6,7 @@
  *
  * Implements a peek-before-flush discipline for EVP cached state.
  *
- * Architecture (per forloopcodes):
+ * Architecture (per @forloopcodes and @drqedwards):
  *
  *   Cached state is treated as an immutable ledger once written —
  *   written once at initialisation, read many times on the hot path.
