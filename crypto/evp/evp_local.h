@@ -12,6 +12,8 @@
 
 #define EVP_CTRL_RET_UNSUPPORTED -1
 
+int ossl_evp_local_is_lockless_atomic_enabled(void);
+
 /*
  * Length of the BASE64-encoded lines when encoding.
  * This needs to be divisible by 3 to keep the AVX2 optimized code path.
