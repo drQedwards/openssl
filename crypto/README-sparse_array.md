@@ -1,4 +1,4 @@
-Sparse Arrays
+Sparse Array
 =============
 
 The `sparse_array.c` file contains an implementation of a sparse array that
