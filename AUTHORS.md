@@ -15,8 +15,8 @@ Groups
  * Google LLC
 
 Individuals
------------
-
+- ----------
+ * Dr Q
  * Andy Polyakov
  * Ben Laurie
  * Ben Kaduk
