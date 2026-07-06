@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2015-2025 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2015-2026 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -30,7 +30,7 @@ sub verify {
     run(app([@args]));
 }
 
-plan tests => 213;
+plan tests => 219;
 
 # Canonical success
 ok(verify("ee-cert", "sslserver", ["root-cert"], ["ca-cert"]),
@@ -473,6 +473,10 @@ ok(!verify("bad-othername-cert", "", ["root-cert"], ["nccaothername-cert"], ),
 ok(verify("nc-uri-cert", "", ["root-cert"], ["ncca4-cert"], ),
    "Name constraints URI with userinfo");
 
+ok(!verify("bad-cert-smtputf8-name-constraints", "root-cert", ["bad-cert-smtputf8-name-constraints"], [],
+	  "-partial_chain", "-attime", "1623060000"),
+   "Name constraints bad othername name constraint");
+
 #Check that we get the expected failure return code
 with({ exit_checker => sub { return shift == 2; } },
      sub {
@@ -624,6 +628,38 @@ run(app(["openssl", "verify",
 ok(grep(/CRL is not yet valid/, do { open my $fh, '<', $cve_28388_stderr; <$fh> }),
    "CVE-2026-28388");
 
+# Delta CRLs must not be accepted as complete CRLs
+my $delta_crl_as_complete_stderr = "delta-crl-as-complete.err";
+ok(!run(app(["openssl", "verify", "-auth_level", "1",
+             "-CAfile",
+             srctop_file(@certspath, "delta-crl-as-complete-ca.pem"),
+             "-no_check_time", "-crl_check",
+             "-CRLfile",
+             srctop_file(@certspath, "delta-crl-as-complete-delta.pem"),
+             srctop_file(@certspath, "delta-crl-as-complete-leaf.pem")],
+             stderr => $delta_crl_as_complete_stderr))
+   && grep(/unable to get certificate CRL/,
+           do { open my $fh, '<', $delta_crl_as_complete_stderr; <$fh> }),
+   "Delta CRL is not accepted as complete CRL");
+
+my $delta_crl_as_complete_reasons_stderr =
+    "delta-crl-as-complete-reasons.err";
+ok(!run(app(["openssl", "verify", "-auth_level", "1",
+             "-CAfile",
+             srctop_file(@certspath, "delta-crl-as-complete-ca.pem"),
+             "-no_check_time", "-crl_check", "-extended_crl",
+             "-CRLfile",
+             srctop_file(@certspath,
+                         "delta-crl-as-complete-delta-reasons.pem"),
+             srctop_file(@certspath, "delta-crl-as-complete-leaf.pem")],
+             stderr => $delta_crl_as_complete_reasons_stderr))
+   && grep(/unable to get certificate CRL/,
+           do {
+               open my $fh, '<', $delta_crl_as_complete_reasons_stderr;
+               <$fh>
+           }),
+   "Delta CRL with onlySomeReasons is not accepted as complete CRL");
+
 # CAstore option
 my $rootcertname = "root-cert";
 my $rootcert = srctop_file(@certspath, "${rootcertname}.pem");
@@ -642,17 +678,26 @@ SKIP: {
     ok(vfy_root("-CAstore", "file:".$foo_file), "CAstore file:foo:cert.pem");
 }
 
-my $file = "cert.pem";
-copy($rootcert, $file);
-ok(vfy_root("-CAstore", $file), "CAstore cert.pem");
-ok(vfy_root("-CAstore", "file:".$file), "CAstore file:cert.pem");
-
+my $rel_cert = "cert.pem";
+copy($rootcert, $rel_cert);
+ok(vfy_root("-CAstore", $rel_cert), "CAstore cert");
+ok(vfy_root("-CAstore", "file:".$rel_cert), "CAstore file:cert");
 my $abs_cert = abs_path($rootcert);
+SKIP: {
+    skip "drive letter with relative filename on Windows only", 2
+        unless $^O =~ /^MsWin32$/;
+    my $drive_rel_cert = substr($abs_cert, 0, 2).$rel_cert;
+    ok(vfy_root("-CAstore", $drive_rel_cert), "CAstore D:cert");
+    ok(vfy_root("-CAstore", "file:".$drive_rel_cert), "CAstore file:D:cert");
+}
+
 # Windows file: URIs should have a path part starting with a slash, i.e.
-# file://authority/C:/what/ever/foo.pem and file:///C:/what/ever/foo.pem
-# file://C:/what/ever/foo.pem is non-standard and may not be accepted.
+# file://authority/C:/what/ever/foo.pem and file:///C:/what/ever/foo.pem.
+# So file://C:/what/ever/foo.pem is non-standard and may not be accepted.
 # See RFC 8089 for details.
 $abs_cert = "/" . $abs_cert if ($^O eq "MSWin32");
+
 ok(vfy_root("-CAstore", "file://".$abs_cert), "CAstore file:///path");
+ok(vfy_root("-CAstore", "file:".$abs_cert), "CAstore file:/path"); # we allow dropping the "//" before an empty authority part
 ok(vfy_root("-CAstore", "file://localhost".$abs_cert), "CAstore file://localhost/path");
 ok(!vfy_root("-CAstore", "file://otherhost".$abs_cert), "CAstore file://otherhost/path");

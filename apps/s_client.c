@@ -9,6 +9,7 @@
  */
 
 #include "internal/e_os.h"
+#include <inttypes.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,7 +187,7 @@ static unsigned int psk_client_cb(SSL *ssl, const char *hint, char *identity,
     }
     if (max_psk_len > INT_MAX || key_len > (long)max_psk_len) {
         BIO_printf(bio_err,
-            "psk buffer of callback is too small (%d) for key (%ld)\n",
+            "psk buffer of callback is too small (%u) for key (%ld)\n",
             max_psk_len, key_len);
         OPENSSL_free(key);
         return 0;
@@ -340,7 +341,7 @@ static int serverinfo_cli_parse_cb(SSL *s, unsigned int ext_type,
     ext_buf[3] = (unsigned char)(inlen);
     memcpy(ext_buf + 4, in, inlen);
 
-    BIO_snprintf(pem_name, sizeof(pem_name), "SERVERINFO FOR EXTENSION %d",
+    BIO_snprintf(pem_name, sizeof(pem_name), "SERVERINFO FOR EXTENSION %u",
         ext_type);
     PEM_write_bio(bio_c_out, pem_name, "", ext_buf, (long)(4 + inlen));
     return 1;
@@ -684,11 +685,11 @@ const OPTIONS s_client_options[] = {
     { "key", OPT_KEY, 's', "Private key file to use; default: -cert file" },
     { "keyform", OPT_KEYFORM, 'f', "Key format (DER/PEM)" },
     { "pass", OPT_PASS, 's', "Private key and cert file pass phrase source" },
-    { "verify", OPT_VERIFY, 'p', "Turn on peer certificate verification" },
+    { "verify", OPT_VERIFY, 'p', "Turn on peer certificate verification, set depth" },
     { "nameopt", OPT_NAMEOPT, 's', "Certificate subject/issuer name printing options" },
-    { "CApath", OPT_CAPATH, '/', "PEM format directory of CA's" },
-    { "CAfile", OPT_CAFILE, '<', "PEM format file of CA's" },
-    { "CAstore", OPT_CASTORE, ':', "URI to store of CA's" },
+    { "CAfile", OPT_CAFILE, '<', "File in PEM format with trusted CA certs" },
+    { "CApath", OPT_CAPATH, '/', "Dir with trusted CA cert files in PEM format" },
+    { "CAstore", OPT_CASTORE, ':', "URI of store with trusted CA certs" },
     { "no-CAfile", OPT_NOCAFILE, '-',
         "Do not load the default certificates file" },
     { "no-CApath", OPT_NOCAPATH, '-',
@@ -874,17 +875,21 @@ const OPTIONS s_client_options[] = {
         "Close connection on verification error" },
     { "verify_quiet", OPT_VERIFY_QUIET, '-', "Restrict verify output to errors" },
     { "chainCAfile", OPT_CHAINCAFILE, '<',
-        "CA file for certificate chain (PEM format)" },
+        "File in PEM format with trusted CA certs to build own cert chain" },
     { "chainCApath", OPT_CHAINCAPATH, '/',
-        "Use dir as certificate store path to build CA certificate chain" },
+        "Dir with trusted CA cert files in PEM format to build own cert chain" },
     { "chainCAstore", OPT_CHAINCASTORE, ':',
-        "CA store URI for certificate chain" },
+        "URI of trusted CA cert store to build own cert chain" },
+    { OPT_MORE_STR, 0, 0,
+        "NOTE: these override -CApath, -CAfile, and -CAstore for client chain building" },
     { "verifyCAfile", OPT_VERIFYCAFILE, '<',
-        "CA file for certificate verification (PEM format)" },
+        "File in PEM format with trusted CA certs for server cert verification" },
     { "verifyCApath", OPT_VERIFYCAPATH, '/',
-        "Use dir as certificate store path to verify CA certificate" },
+        "Dir with trusted CA cert files in PEM format for server cert verification" },
     { "verifyCAstore", OPT_VERIFYCASTORE, ':',
-        "CA store URI for certificate verification" },
+        "URI of trusted CA cert store for server cert verification" },
+    { OPT_MORE_STR, 0, 0,
+        "NOTE: these override -CApath, -CAfile, and -CAstore for server cert verification" },
     OPT_X_OPTIONS,
     OPT_PROV_OPTIONS,
 
@@ -1221,7 +1226,7 @@ int s_client_main(int argc, char **argv)
             break;
         case OPT_VERIFY:
             verify = SSL_VERIFY_PEER;
-            verify_args.depth = atoi(opt_arg());
+            verify_args.depth = opt_int_arg();
             if (!c_quiet)
                 BIO_printf(bio_err, "verify depth is %d\n", verify_args.depth);
             break;
@@ -1402,7 +1407,7 @@ int s_client_main(int argc, char **argv)
                 min_version = TLS1_VERSION;
             break;
         case OPT_SRP_STRENGTH:
-            srp_arg.strength = atoi(opt_arg());
+            srp_arg.strength = opt_int_arg();
             BIO_printf(bio_err, "SRP minimal length for N is %d\n",
                 srp_arg.strength);
             if (min_version < TLS1_VERSION)
@@ -1648,7 +1653,7 @@ int s_client_main(int argc, char **argv)
             sni_outer_name = opt_arg();
             break;
         case OPT_ECH_SELECT:
-            ech_select = atoi(opt_arg());
+            ech_select = opt_int_arg();
             break;
         case OPT_ECH_GREASE:
             ech_grease = 1;
@@ -1657,7 +1662,13 @@ int s_client_main(int argc, char **argv)
             ech_grease_suite = opt_arg();
             break;
         case OPT_ECH_GREASE_TYPE:
-            ech_grease_type = atoi(opt_arg());
+            ech_grease_type = opt_int_arg();
+            if (ech_grease_type != (ech_grease_type & 0xFFFF)) {
+                BIO_printf(bio_err,
+                    "%s: invalid GREASE ECH type 0x%8x\n permitted values are 0-FFFF",
+                    prog, ech_grease_type);
+                goto opthelp;
+            }
             break;
         case OPT_ECH_IGNORE_CONFIG_ID:
             ech_ignore_cid = 1;
@@ -1678,13 +1689,13 @@ int s_client_main(int argc, char **argv)
             keymatexportlabel = opt_arg();
             break;
         case OPT_KEYMATEXPORTLEN:
-            keymatexportlen = atoi(opt_arg());
+            keymatexportlen = opt_int_arg();
             break;
         case OPT_ASYNC:
             async = 1;
             break;
         case OPT_MAXFRAGLEN:
-            len = atoi(opt_arg());
+            len = opt_int_arg();
             switch (len) {
             case 512:
                 maxfraglen = TLSEXT_max_fragment_length_512;
@@ -1700,22 +1711,22 @@ int s_client_main(int argc, char **argv)
                 break;
             default:
                 BIO_printf(bio_err,
-                    "%s: Max Fragment Len %u is out of permitted values",
+                    "%s: Max Fragment Len %d is out of permitted values",
                     prog, len);
                 goto opthelp;
             }
             break;
         case OPT_MAX_SEND_FRAG:
-            max_send_fragment = atoi(opt_arg());
+            max_send_fragment = opt_int_arg();
             break;
         case OPT_SPLIT_SEND_FRAG:
-            split_send_fragment = atoi(opt_arg());
+            split_send_fragment = opt_int_arg();
             break;
         case OPT_MAX_PIPELINES:
-            max_pipelines = atoi(opt_arg());
+            max_pipelines = opt_int_arg();
             break;
         case OPT_READ_BUF:
-            read_buf_len = atoi(opt_arg());
+            read_buf_len = opt_int_arg();
             break;
         case OPT_KEYLOG_FILE:
             keylog_file = opt_arg();
@@ -2078,7 +2089,7 @@ int s_client_main(int argc, char **argv)
             vfyCApath, vfyCAfile, vfyCAstore,
             chCApath, chCAfile, chCAstore,
             crls, crl_download)) {
-        BIO_puts(bio_err, "Error loading store locations\n");
+        BIO_puts(bio_err, "Error loading store locations for server cert verification and client cert chain building\n");
         goto end;
     }
     if (ReqCAfile != NULL) {
@@ -2186,8 +2197,10 @@ int s_client_main(int argc, char **argv)
     SSL_CTX_set_verify(ctx, verify, verify_callback);
 
     if (!ctx_set_verify_locations(ctx, CAfile, noCAfile, CApath, noCApath,
-            CAstore, noCAstore))
+            CAstore, noCAstore)) {
+        BIO_puts(bio_err, "Error setting default locations for trusted certificates\n");
         goto end;
+    }
 
     ssl_ctx_add_crls(ctx, crls, crl_download);
 
@@ -2720,7 +2733,7 @@ re_start:
                          "xmlns='jabber:%s' to='%s' version='1.0'>",
             starttls_proto == PROTO_XMPP ? "client" : "server",
             protohost ? protohost : host);
-        seen = BIO_read(sbio, mbuf, BUFSIZZ);
+        seen = BIO_read(sbio, mbuf, BUFSIZZ - 1);
         if (seen < 0) {
             BIO_printf(bio_err, "BIO_read failed\n");
             goto end;
@@ -2729,7 +2742,7 @@ re_start:
         while (!strstr(mbuf, "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'")
             && !strstr(mbuf,
                 "<starttls xmlns=\"urn:ietf:params:xml:ns:xmpp-tls\"")) {
-            seen = BIO_read(sbio, mbuf, BUFSIZZ);
+            seen = BIO_read(sbio, mbuf, BUFSIZZ - 1);
 
             if (seen <= 0)
                 goto shut;
@@ -2738,7 +2751,7 @@ re_start:
         }
         BIO_puts(sbio,
             "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>");
-        seen = BIO_read(sbio, sbuf, BUFSIZZ);
+        seen = BIO_read(sbio, sbuf, BUFSIZZ - 1);
         if (seen < 0) {
             BIO_puts(bio_err, "BIO_read failed\n");
             goto shut;
@@ -2963,7 +2976,7 @@ re_start:
                 "Didn't find STARTTLS in server response,"
                 " trying anyway...\n");
         BIO_puts(sbio, "STARTTLS\r\n");
-        mbuf_len = BIO_read(sbio, mbuf, BUFSIZZ);
+        mbuf_len = BIO_read(sbio, mbuf, BUFSIZZ - 1);
         if (mbuf_len < 0) {
             BIO_puts(bio_err, "BIO_read failed\n");
             goto end;
@@ -3004,7 +3017,7 @@ re_start:
                 "Didn't find STARTTLS in server response,"
                 " trying anyway...\n");
         BIO_puts(sbio, "STARTTLS\r\n");
-        mbuf_len = BIO_read(sbio, mbuf, BUFSIZZ);
+        mbuf_len = BIO_read(sbio, mbuf, BUFSIZZ - 1);
         if (mbuf_len < 0) {
             BIO_puts(bio_err, "BIO_read failed\n");
             goto end;
@@ -3016,11 +3029,9 @@ re_start:
         }
         /*
          * According to RFC 5804 § 2.2, response codes are case-
-         * insensitive, make it uppercase but preserve the response.
+         * insensitive.
          */
-        strncpy(sbuf, mbuf, 2);
-        make_uppercase(sbuf);
-        if (!HAS_PREFIX(sbuf, "OK")) {
+        if (OPENSSL_strncasecmp(mbuf, "OK", 2) != 0) {
             BIO_printf(bio_err, "STARTTLS not supported: %s", mbuf);
             goto shut;
         }
@@ -3465,7 +3476,7 @@ re_start:
             if (crlf) {
                 int j, lf_num;
 
-                i = raw_read_stdin(cbuf, BUFSIZZ / 2);
+                i = raw_read_stdin(cbuf, (BUFSIZZ - 1) / 2);
                 lf_num = 0;
                 /* both loops are skipped when i <= 0 */
                 for (j = 0; j < i; j++)
@@ -3481,7 +3492,7 @@ re_start:
                 }
                 assert(lf_num == 0);
             } else
-                i = raw_read_stdin(cbuf, BUFSIZZ);
+                i = raw_read_stdin(cbuf, BUFSIZZ - 1);
 #if !defined(OPENSSL_SYS_WINDOWS) && !defined(OPENSSL_SYS_MSDOS)
             if (i == 0)
                 at_eof = 1;
@@ -3509,29 +3520,32 @@ shut:
         print_stuff(bio_c_out, con, full_log);
     do_ssl_shutdown(con);
 
-    /*
-     * If we ended with an alert being sent, but still with data in the
-     * network buffer to be read, then calling BIO_closesocket() will
-     * result in a TCP-RST being sent. On some platforms (notably
-     * Windows) then this will result in the peer immediately abandoning
-     * the connection including any buffered alert data before it has
-     * had a chance to be read. Shutting down the sending side first,
-     * and then closing the socket sends TCP-FIN first followed by
-     * TCP-RST. This seems to allow the peer to read the alert data.
-     */
-    shutdown(SSL_get_fd(con), 1); /* SHUT_WR */
-    /*
-     * We just said we have nothing else to say, but it doesn't mean that
-     * the other side has nothing. It's even recommended to consume incoming
-     * data. [In testing context this ensures that alerts are passed on...]
-     */
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 500000; /* some extreme round-trip */
-    do {
-        FD_ZERO(&readfds);
-        openssl_fdset(sock, &readfds);
-    } while (select(sock + 1, &readfds, NULL, NULL, &timeout) > 0
-        && BIO_read(sbio, sbuf, BUFSIZZ) > 0);
+    /* The following half-close/drain workaround is TCP-specific. */
+    if (!isdtls && !isquic) {
+        /*
+         * If we ended with an alert being sent, but still with data in the
+         * network buffer to be read, then calling BIO_closesocket() will
+         * result in a TCP-RST being sent. On some platforms (notably
+         * Windows) then this will result in the peer immediately abandoning
+         * the connection including any buffered alert data before it has
+         * had a chance to be read. Shutting down the sending side first,
+         * and then closing the socket sends TCP-FIN first followed by
+         * TCP-RST. This seems to allow the peer to read the alert data.
+         */
+        shutdown(SSL_get_fd(con), 1); /* SHUT_WR */
+        /*
+         * We just said we have nothing else to say, but it doesn't mean that
+         * the other side has nothing. It's even recommended to consume incoming
+         * data. [In testing context this ensures that alerts are passed on...]
+         */
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 500000; /* some extreme round-trip */
+        do {
+            FD_ZERO(&readfds);
+            openssl_fdset(sock, &readfds);
+        } while (select(sock + 1, &readfds, NULL, NULL, &timeout) > 0
+            && BIO_read(sbio, sbuf, BUFSIZZ) > 0);
+    }
 
     BIO_closesocket(SSL_get_fd(con));
 end:
@@ -3838,8 +3852,8 @@ static void print_stuff(BIO *bio, SSL *s, int full)
 #endif
 
         BIO_printf(bio,
-            "---\nSSL handshake has read %ju bytes "
-            "and written %ju bytes\n",
+            "---\nSSL handshake has read %" PRIu64 " bytes "
+            "and written %" PRIu64 " bytes\n",
             BIO_number_read(SSL_get_rbio(s)),
             BIO_number_written(SSL_get_wbio(s)));
     }

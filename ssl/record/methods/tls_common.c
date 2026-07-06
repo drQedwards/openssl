@@ -1,5 +1,5 @@
 /*
- * Copyright 2022-2025 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -497,7 +497,7 @@ static int tls_record_app_data_waiting(OSSL_RECORD_LAYER *rl)
 static int rlayer_early_data_count_ok(OSSL_RECORD_LAYER *rl, size_t length,
     size_t overhead, int send)
 {
-    uint32_t max_early_data = rl->max_early_data;
+    uint64_t max_early_data = rl->max_early_data;
 
     if (max_early_data == 0) {
         RLAYERfatal(rl, send ? SSL_AD_INTERNAL_ERROR : SSL_AD_UNEXPECTED_MESSAGE,
@@ -506,7 +506,7 @@ static int rlayer_early_data_count_ok(OSSL_RECORD_LAYER *rl, size_t length,
     }
 
     /* If we are dealing with ciphertext we need to allow for the overhead */
-    max_early_data += (uint32_t)overhead;
+    max_early_data += overhead;
 
     if (rl->early_data_count + length > max_early_data) {
         RLAYERfatal(rl, send ? SSL_AD_INTERNAL_ERROR : SSL_AD_UNEXPECTED_MESSAGE,
@@ -525,8 +525,6 @@ static int rlayer_early_data_count_ok(OSSL_RECORD_LAYER *rl, size_t length,
  * cause tls_get_more_records to loop forever.
  */
 #define MAX_EMPTY_RECORDS 32
-
-#define SSL2_RT_HEADER_LENGTH 2
 
 /*-
  * Call this to buffer new input records in rl->rrec.
@@ -626,12 +624,7 @@ int tls_get_more_records(OSSL_RECORD_LAYER *rl)
          * rl->rstate == SSL_ST_READ_BODY, get and decode the data. Calculate
          * how much more data we need to read for the rest of the record
          */
-        if (thisrr->rec_version == SSL2_VERSION) {
-            more = thisrr->length + SSL2_RT_HEADER_LENGTH
-                - SSL3_RT_HEADER_LENGTH;
-        } else {
-            more = thisrr->length;
-        }
+        more = thisrr->length;
 
         if (more > 0) {
             /* now rl->packet_length == SSL3_RT_HEADER_LENGTH */
@@ -646,13 +639,9 @@ int tls_get_more_records(OSSL_RECORD_LAYER *rl)
 
         /*
          * At this point, rl->packet_length == SSL3_RT_HEADER_LENGTH
-         * + thisrr->length, or rl->packet_length == SSL2_RT_HEADER_LENGTH
          * + thisrr->length and we have that many bytes in rl->packet
          */
-        if (thisrr->rec_version == SSL2_VERSION)
-            thisrr->input = &(rl->packet[SSL2_RT_HEADER_LENGTH]);
-        else
-            thisrr->input = &(rl->packet[SSL3_RT_HEADER_LENGTH]);
+        thisrr->input = &(rl->packet[SSL3_RT_HEADER_LENGTH]);
 
         /*
          * ok, we can now read from 'rl->packet' data into 'thisrr'.
@@ -824,7 +813,7 @@ int tls_get_more_records(OSSL_RECORD_LAYER *rl)
     }
     OSSL_TRACE_BEGIN(TLS)
     {
-        BIO_printf(trc_out, "dec %lu\n", (unsigned long)rr[0].length);
+        BIO_printf(trc_out, "dec %zu\n", rr[0].length);
         BIO_dump_indent(trc_out, rr[0].data, (int)rr[0].length, 4);
     }
     OSSL_TRACE_END(TLS);
@@ -1349,7 +1338,7 @@ tls_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
     int mactype,
     const EVP_MD *md, COMP_METHOD *comp,
     const EVP_MD *kdfdigest, BIO *prev, BIO *transport,
-    BIO *next, BIO_ADDR *local, BIO_ADDR *peer,
+    BIO *next,
     const OSSL_PARAM *settings, const OSSL_PARAM *options,
     const OSSL_DISPATCH *fns, void *cbarg, void *rlarg,
     OSSL_RECORD_LAYER **retrl)
@@ -1398,7 +1387,7 @@ err:
 static void tls_int_free(OSSL_RECORD_LAYER *rl)
 {
     BIO_free(rl->prev);
-    BIO_free(rl->bio);
+    BIO_free_all(rl->bio);
     BIO_free(rl->next);
     ossl_tls_buffer_release(&rl->rbuf);
 
@@ -1412,8 +1401,6 @@ static void tls_int_free(OSSL_RECORD_LAYER *rl)
 #endif
     OPENSSL_free(rl->iv);
     OPENSSL_free(rl->nonce);
-    if (rl->version == SSL3_VERSION)
-        OPENSSL_cleanse(rl->mac_secret, sizeof(rl->mac_secret));
 
     TLS_RL_RECORD_release(rl->rrec, SSL_MAX_PIPELINES);
 
@@ -1918,6 +1905,28 @@ int tls_retry_write_records(OSSL_RECORD_LAYER *rl)
                 tls_release_write_buffer(rl);
             return OSSL_RECORD_RETURN_SUCCESS;
         } else if (i <= 0) {
+            /*
+             * If the app buffer is used directly (kTLS) and the caller is
+             * allowed to move it, copy the unsent data so the original
+             * buffer can be safely released.
+             */
+            if (TLS_BUFFER_is_app_buffer(thiswb)
+                && (rl->mode & SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER) != 0) {
+                size_t left = TLS_BUFFER_get_left(thiswb);
+                unsigned char *buf;
+
+                buf = OPENSSL_malloc(left);
+                if (buf == NULL) {
+                    RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+                    return OSSL_RECORD_RETURN_FATAL;
+                }
+                memcpy(buf,
+                    TLS_BUFFER_get_buf(thiswb) + TLS_BUFFER_get_offset(thiswb),
+                    left);
+                TLS_BUFFER_set_buf(thiswb, buf);
+                TLS_BUFFER_set_offset(thiswb, 0);
+                TLS_BUFFER_set_app_buffer(thiswb, 0);
+            }
             if (rl->isdtls) {
                 /*
                  * For DTLS, just drop it. That's kind of the whole point in
@@ -1944,7 +1953,7 @@ int tls_set1_bio(OSSL_RECORD_LAYER *rl, BIO *bio)
 {
     if (bio != NULL && !BIO_up_ref(bio))
         return 0;
-    BIO_free(rl->bio);
+    BIO_free_all(rl->bio);
     rl->bio = bio;
 
     return 1;

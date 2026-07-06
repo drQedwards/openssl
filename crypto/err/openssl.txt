@@ -1106,6 +1106,7 @@ PROV_R_INVALID_THREAD_POOL_SIZE:234:invalid thread pool size
 PROV_R_INVALID_UKM_LENGTH:200:invalid ukm length
 PROV_R_INVALID_X931_DIGEST:170:invalid x931 digest
 PROV_R_IN_ERROR_STATE:192:in error state
+PROV_R_KEY_IMMUTABLE_ONCE_SET:266:key immutable once set
 PROV_R_KEY_SETUP_FAILED:101:key setup failed
 PROV_R_KEY_SIZE_TOO_SMALL:171:key size too small
 PROV_R_LENGTH_TOO_LARGE:202:length too large
@@ -1850,6 +1851,7 @@ X509_R_CANT_CHECK_DH_KEY:114:can't check dh key
 X509_R_CERTIFICATE_VERIFICATION_FAILED:139:certificate verification failed
 X509_R_CERT_ALREADY_IN_HASH_TABLE:101:cert already in hash table
 X509_R_CRL_ALREADY_DELTA:127:crl already delta
+X509_R_CRL_SIGNATURE_ALGORITHM_MISMATCH:147:crl signature algorithm mismatch
 X509_R_CRL_VERIFY_FAILURE:131:crl verify failure
 X509_R_DUPLICATE_ATTRIBUTE:140:duplicate attribute
 X509_R_ERROR_GETTING_MD_BY_NID:141:error getting md by nid

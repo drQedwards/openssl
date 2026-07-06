@@ -475,6 +475,10 @@ DEPEND[html/man3/ASN1_BIT_STRING_get_length.html]=man3/ASN1_BIT_STRING_get_lengt
 GENERATE[html/man3/ASN1_BIT_STRING_get_length.html]=man3/ASN1_BIT_STRING_get_length.pod
 DEPEND[man/man3/ASN1_BIT_STRING_get_length.3]=man3/ASN1_BIT_STRING_get_length.pod
 GENERATE[man/man3/ASN1_BIT_STRING_get_length.3]=man3/ASN1_BIT_STRING_get_length.pod
+DEPEND[html/man3/ASN1_BIT_STRING_new.html]=man3/ASN1_BIT_STRING_new.pod
+GENERATE[html/man3/ASN1_BIT_STRING_new.html]=man3/ASN1_BIT_STRING_new.pod
+DEPEND[man/man3/ASN1_BIT_STRING_new.3]=man3/ASN1_BIT_STRING_new.pod
+GENERATE[man/man3/ASN1_BIT_STRING_new.3]=man3/ASN1_BIT_STRING_new.pod
 DEPEND[html/man3/ASN1_EXTERN_FUNCS.html]=man3/ASN1_EXTERN_FUNCS.pod
 GENERATE[html/man3/ASN1_EXTERN_FUNCS.html]=man3/ASN1_EXTERN_FUNCS.pod
 DEPEND[man/man3/ASN1_EXTERN_FUNCS.3]=man3/ASN1_EXTERN_FUNCS.pod
@@ -1151,6 +1155,10 @@ DEPEND[html/man3/EVP_DigestVerifyInit.html]=man3/EVP_DigestVerifyInit.pod
 GENERATE[html/man3/EVP_DigestVerifyInit.html]=man3/EVP_DigestVerifyInit.pod
 DEPEND[man/man3/EVP_DigestVerifyInit.3]=man3/EVP_DigestVerifyInit.pod
 GENERATE[man/man3/EVP_DigestVerifyInit.3]=man3/EVP_DigestVerifyInit.pod
+DEPEND[html/man3/EVP_EC_gen.html]=man3/EVP_EC_gen.pod
+GENERATE[html/man3/EVP_EC_gen.html]=man3/EVP_EC_gen.pod
+DEPEND[man/man3/EVP_EC_gen.3]=man3/EVP_EC_gen.pod
+GENERATE[man/man3/EVP_EC_gen.3]=man3/EVP_EC_gen.pod
 DEPEND[html/man3/EVP_EncodeInit.html]=man3/EVP_EncodeInit.pod
 GENERATE[html/man3/EVP_EncodeInit.html]=man3/EVP_EncodeInit.pod
 DEPEND[man/man3/EVP_EncodeInit.3]=man3/EVP_EncodeInit.pod
@@ -1491,6 +1499,10 @@ DEPEND[html/man3/MDC2_Init.html]=man3/MDC2_Init.pod
 GENERATE[html/man3/MDC2_Init.html]=man3/MDC2_Init.pod
 DEPEND[man/man3/MDC2_Init.3]=man3/MDC2_Init.pod
 GENERATE[man/man3/MDC2_Init.3]=man3/MDC2_Init.pod
+DEPEND[html/man3/NAME_CONSTRAINTS_check.html]=man3/NAME_CONSTRAINTS_check.pod
+GENERATE[html/man3/NAME_CONSTRAINTS_check.html]=man3/NAME_CONSTRAINTS_check.pod
+DEPEND[man/man3/NAME_CONSTRAINTS_check.3]=man3/NAME_CONSTRAINTS_check.pod
+GENERATE[man/man3/NAME_CONSTRAINTS_check.3]=man3/NAME_CONSTRAINTS_check.pod
 DEPEND[html/man3/NCONF_new_ex.html]=man3/NCONF_new_ex.pod
 GENERATE[html/man3/NCONF_new_ex.html]=man3/NCONF_new_ex.pod
 DEPEND[man/man3/NCONF_new_ex.3]=man3/NCONF_new_ex.pod
@@ -3162,6 +3174,7 @@ GENERATE[man/man3/s2i_ASN1_IA5STRING.3]=man3/s2i_ASN1_IA5STRING.pod
 IMAGEDOCS[man3]=
 HTMLDOCS[man3]=html/man3/ADMISSIONS.html \
 html/man3/ASN1_BIT_STRING_get_length.html \
+html/man3/ASN1_BIT_STRING_new.html \
 html/man3/ASN1_EXTERN_FUNCS.html \
 html/man3/ASN1_INTEGER_get_int64.html \
 html/man3/ASN1_INTEGER_new.html \
@@ -3331,6 +3344,7 @@ html/man3/EVP_CIPHER_CTX_get_original_iv.html \
 html/man3/EVP_DigestInit.html \
 html/man3/EVP_DigestSignInit.html \
 html/man3/EVP_DigestVerifyInit.html \
+html/man3/EVP_EC_gen.html \
 html/man3/EVP_EncodeInit.html \
 html/man3/EVP_EncryptInit.html \
 html/man3/EVP_KDF.html \
@@ -3416,6 +3430,7 @@ html/man3/GENERAL_NAME.html \
 html/man3/HMAC.html \
 html/man3/MD5.html \
 html/man3/MDC2_Init.html \
+html/man3/NAME_CONSTRAINTS_check.html \
 html/man3/NCONF_new_ex.html \
 html/man3/OBJ_nid2obj.html \
 html/man3/OCSP_REQUEST_new.html \
@@ -3835,6 +3850,7 @@ html/man3/o2i_SCT_LIST.html \
 html/man3/s2i_ASN1_IA5STRING.html
 MANDOCS[man3]=man/man3/ADMISSIONS.3 \
 man/man3/ASN1_BIT_STRING_get_length.3 \
+man/man3/ASN1_BIT_STRING_new.3 \
 man/man3/ASN1_EXTERN_FUNCS.3 \
 man/man3/ASN1_INTEGER_get_int64.3 \
 man/man3/ASN1_INTEGER_new.3 \
@@ -4004,6 +4020,7 @@ man/man3/EVP_CIPHER_CTX_get_original_iv.3 \
 man/man3/EVP_DigestInit.3 \
 man/man3/EVP_DigestSignInit.3 \
 man/man3/EVP_DigestVerifyInit.3 \
+man/man3/EVP_EC_gen.3 \
 man/man3/EVP_EncodeInit.3 \
 man/man3/EVP_EncryptInit.3 \
 man/man3/EVP_KDF.3 \
@@ -4089,6 +4106,7 @@ man/man3/GENERAL_NAME.3 \
 man/man3/HMAC.3 \
 man/man3/MD5.3 \
 man/man3/MDC2_Init.3 \
+man/man3/NAME_CONSTRAINTS_check.3 \
 man/man3/NCONF_new_ex.3 \
 man/man3/OBJ_nid2obj.3 \
 man/man3/OCSP_REQUEST_new.3 \
@@ -4825,6 +4843,10 @@ DEPEND[html/man7/EVP_PKEY-ML-KEM.html]=man7/EVP_PKEY-ML-KEM.pod
 GENERATE[html/man7/EVP_PKEY-ML-KEM.html]=man7/EVP_PKEY-ML-KEM.pod
 DEPEND[man/man7/EVP_PKEY-ML-KEM.7]=man7/EVP_PKEY-ML-KEM.pod
 GENERATE[man/man7/EVP_PKEY-ML-KEM.7]=man7/EVP_PKEY-ML-KEM.pod
+DEPEND[html/man7/EVP_PKEY-MLX-KEM.html]=man7/EVP_PKEY-MLX-KEM.pod
+GENERATE[html/man7/EVP_PKEY-MLX-KEM.html]=man7/EVP_PKEY-MLX-KEM.pod
+DEPEND[man/man7/EVP_PKEY-MLX-KEM.7]=man7/EVP_PKEY-MLX-KEM.pod
+GENERATE[man/man7/EVP_PKEY-MLX-KEM.7]=man7/EVP_PKEY-MLX-KEM.pod
 DEPEND[html/man7/EVP_PKEY-RSA.html]=man7/EVP_PKEY-RSA.pod
 GENERATE[html/man7/EVP_PKEY-RSA.html]=man7/EVP_PKEY-RSA.pod
 DEPEND[man/man7/EVP_PKEY-RSA.7]=man7/EVP_PKEY-RSA.pod
@@ -5268,6 +5290,7 @@ html/man7/EVP_PKEY-HMAC.html \
 html/man7/EVP_PKEY-LMS.html \
 html/man7/EVP_PKEY-ML-DSA.html \
 html/man7/EVP_PKEY-ML-KEM.html \
+html/man7/EVP_PKEY-MLX-KEM.html \
 html/man7/EVP_PKEY-RSA.html \
 html/man7/EVP_PKEY-SLH-DSA.html \
 html/man7/EVP_PKEY-SM2.html \
@@ -5433,6 +5456,7 @@ man/man7/EVP_PKEY-HMAC.7 \
 man/man7/EVP_PKEY-LMS.7 \
 man/man7/EVP_PKEY-ML-DSA.7 \
 man/man7/EVP_PKEY-ML-KEM.7 \
+man/man7/EVP_PKEY-MLX-KEM.7 \
 man/man7/EVP_PKEY-RSA.7 \
 man/man7/EVP_PKEY-SLH-DSA.7 \
 man/man7/EVP_PKEY-SM2.7 \

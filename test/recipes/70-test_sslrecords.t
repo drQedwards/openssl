@@ -59,14 +59,16 @@ sub run_tests
             \&add_empty_recs_filter,
             cmdstr(app([ "openssl" ]), display => 1),
             srctop_file("apps", "server.pem"),
-            (!$ENV{HARNESS_ACTIVE} || $ENV{HARNESS_VERBOSE})
+            (!$ENV{HARNESS_ACTIVE} || $ENV{HARNESS_VERBOSE}),
+            have_IPv6()
         );
     } else {
         $proxy = TLSProxy::Proxy->new(
             \&add_empty_recs_filter,
             cmdstr(app([ "openssl" ]), display => 1),
             srctop_file("apps", "server.pem"),
-            (!$ENV{HARNESS_ACTIVE} || $ENV{HARNESS_VERBOSE})
+            (!$ENV{HARNESS_ACTIVE} || $ENV{HARNESS_VERBOSE}),
+            have_IPv6()
         );
     }
 
@@ -308,7 +310,6 @@ sub add_empty_recs_filter
                 0,
                 0,
                 0,
-                0,
                 "",
                 ""
             );
@@ -317,7 +318,6 @@ sub add_empty_recs_filter
                 0,
                 $content_type,
                 TLSProxy::Record::VERS_TLS_1_2,
-                0,
                 0,
                 0,
                 0,
@@ -341,19 +341,6 @@ sub add_frag_alert_filter
         return;
     }
 
-    # Add a zero length fragment first
-    #my $record = TLSProxy::Record->new(
-    #    0,
-    #    TLSProxy::Record::RT_ALERT,
-    #    TLSProxy::Record::VERS_TLS_1_2,
-    #    0,
-    #    0,
-    #    0,
-    #    "",
-    #    ""
-    #);
-    #push @{$proxy->record_list}, $record;
-
     # Now add the alert level (Fatal) as a separate record
     $byte = pack('C', TLSProxy::Message::AL_LEVEL_FATAL);
     my $record = TLSProxy::Record->new(
@@ -361,7 +348,6 @@ sub add_frag_alert_filter
         TLSProxy::Record::RT_ALERT,
         TLSProxy::Record::VERS_TLS_1_2,
         1,
-        0,
         1,
         1,
         $byte,
@@ -376,7 +362,6 @@ sub add_frag_alert_filter
         TLSProxy::Record::RT_ALERT,
         TLSProxy::Record::VERS_TLS_1_2,
         1,
-        0,
         1,
         1,
         $byte,
@@ -411,7 +396,6 @@ sub add_unknown_record_type
             @{$records}[-1]->epoch(),
             @{$records}[-1]->seq() +1,
             1,
-            0,
             1,
             1,
             "X",
@@ -423,7 +407,6 @@ sub add_unknown_record_type
             TLSProxy::Record::RT_UNKNOWN,
             @{$records}[-1]->version(),
             1,
-            0,
             1,
             1,
             "X",
@@ -567,7 +550,6 @@ sub not_on_record_boundary
             0,
             0,
             0,
-            0,
             "",
             ""
         );
@@ -597,7 +579,6 @@ sub not_on_record_boundary
             0,
             0,
             0,
-            0,
             "",
             ""
         );
@@ -622,7 +603,6 @@ sub not_on_record_boundary
                 0,
                 0,
                 0,
-                0,
                 "",
                 ""
             );
@@ -640,7 +620,6 @@ sub not_on_record_boundary
             1,
             TLSProxy::Record::RT_APPLICATION_DATA,
             TLSProxy::Record::VERS_TLS_1_2,
-            0,
             0,
             0,
             0,
@@ -692,7 +671,6 @@ sub empty_app_data
         1,
         1,
         length($data),
-        0,
         length($data),
         0,
         $data,

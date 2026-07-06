@@ -12,7 +12,11 @@
 #define OSSL_PROV_CIPHERCOMMON_GCM_H
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <openssl/aes.h>
+#include "prov/ciphercommon.h"
 #include "ciphercommon_aead.h"
 
 typedef struct prov_gcm_hw_st PROV_GCM_HW;
@@ -118,11 +122,5 @@ int ossl_gcm_one_shot(PROV_GCM_CTX *ctx, unsigned char *aad, size_t aad_len,
     unsigned char *out, unsigned char *tag, size_t tag_len);
 int ossl_gcm_cipher_update(PROV_GCM_CTX *ctx, const unsigned char *in,
     size_t len, unsigned char *out);
-
-#define GCM_HW_SET_KEY_CTR_FN(ks, fn_set_enc_key, fn_block, fn_ctr) \
-    fn_set_enc_key(key, (int)(keylen * 8), ks);                     \
-    CRYPTO_gcm128_init(&ctx->gcm, ks, (block128_f)fn_block);        \
-    ctx->ctr = (ctr128_f)fn_ctr;                                    \
-    ctx->key_set = 1;
 
 #endif

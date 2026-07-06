@@ -34,7 +34,8 @@ my $proxy = TLSProxy::Proxy->new(
     undef,
     cmdstr(app(["openssl"]), display => 1),
     srctop_file("apps", "server.pem"),
-    (!$ENV{HARNESS_ACTIVE} || $ENV{HARNESS_VERBOSE})
+    (!$ENV{HARNESS_ACTIVE} || $ENV{HARNESS_VERBOSE}),
+    have_IPv6()
 );
 
 use constant {
@@ -176,7 +177,6 @@ sub hrr_filter
             $hrr_record->content_type(),
             $hrr_record->version(),
             $hrr_record->len(),
-            $hrr_record->sslv2(),
             $hrr_record->len_real(),
             $hrr_record->decrypt_len(),
             $hrr_record->data(),

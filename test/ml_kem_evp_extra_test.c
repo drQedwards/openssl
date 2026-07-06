@@ -18,8 +18,10 @@
 #include <openssl/core_names.h>
 #include <openssl/params.h>
 #include <openssl/param_build.h>
+#include <openssl/proverr.h>
 #include <openssl/rand.h>
 #include <crypto/ml_kem.h>
+#include "crypto/evp.h"
 #include "testutil.h"
 
 static OSSL_LIB_CTX *testctx = NULL;
@@ -420,6 +422,225 @@ static int test_ml_kem_from_data_propq(void)
     return ret;
 }
 
+#ifndef OPENSSL_NO_EC
+static const char *mlx_kem_algs[] = {
+#ifndef OPENSSL_NO_ECX
+    "X25519MLKEM768",
+#endif
+    "SecP256r1MLKEM768",
+    "SecP384r1MLKEM1024",
+};
+#endif
+
+/*
+ * Test that mlx_kem_dup() with partial selection (public-only) does not
+ * corrupt the original key. Before the fix, the default branch of the
+ * switch in mlx_kem_dup() would call mlx_kem_key_free() on a shallow copy
+ * without nulling mkey/xkey first, causing a double-free when the original
+ * key was later freed.
+ */
+#ifndef OPENSSL_NO_EC
+static int test_mlx_kem_dup_partial_selection(int idx)
+{
+    const char *alg = mlx_kem_algs[idx];
+    EVP_PKEY_CTX *genctx = NULL;
+    EVP_PKEY_CTX *encctx = NULL;
+    EVP_PKEY *keypair = NULL;
+    EVP_PKEY *dest = NULL;
+    size_t wrpkeylen = 0, genkeylen = 0;
+    int ret = 0;
+
+    /* Generate an MLX KEM keypair */
+    if (!TEST_ptr(genctx = EVP_PKEY_CTX_new_from_name(testctx, alg, NULL))
+        || !TEST_int_eq(EVP_PKEY_keygen_init(genctx), 1)
+        || !TEST_int_eq(EVP_PKEY_keygen(genctx, &keypair), 1))
+        goto err;
+
+    /*
+     * Attempt a partial copy (public-key only). EVP_PKEY_PUBLIC_KEY includes
+     * OSSL_KEYMGMT_SELECT_PUBLIC_KEY (0x02) but not private, so
+     * selection & OSSL_KEYMGMT_SELECT_KEYPAIR == 0x02 which hits the default
+     * branch in mlx_kem_dup(). This should fail gracefully without corrupting
+     * the source key.
+     */
+    if (!TEST_ptr(dest = EVP_PKEY_new()))
+        goto err;
+    /* Expected to fail — partial duplication is not supported for MLX KEM */
+    evp_keymgmt_util_copy(dest, keypair, EVP_PKEY_PUBLIC_KEY);
+    ERR_clear_error();
+
+    /*
+     * Verify the original keypair is still intact by performing an
+     * encapsulate operation. If the partial copy corrupted the key
+     * (double-freed mkey/xkey), this would crash or trigger ASan.
+     */
+    if (!TEST_ptr(encctx = EVP_PKEY_CTX_new_from_pkey(testctx, keypair, NULL))
+        || !TEST_int_gt(EVP_PKEY_encapsulate_init(encctx, NULL), 0)
+        || !TEST_int_gt(EVP_PKEY_encapsulate(encctx, NULL, &wrpkeylen,
+                            NULL, &genkeylen),
+            0)
+        || !TEST_size_t_gt(wrpkeylen, 0)
+        || !TEST_size_t_gt(genkeylen, 0))
+        goto err;
+
+    ret = 1;
+err:
+    EVP_PKEY_CTX_free(encctx);
+    EVP_PKEY_free(dest);
+    EVP_PKEY_free(keypair);
+    EVP_PKEY_CTX_free(genctx);
+    return ret;
+}
+#endif /* OPENSSL_NO_EC */
+
+/*
+ * Test that ML-KEM keys are immutable once key material is set.
+ *
+ * Part 1 — keymgmt import dispatch (ml_kem_import):
+ *   Sub-case A: public-key-only first import succeeds; re-import of the
+ *               same public key and any keypair import must fail with
+ *               PROV_R_KEY_IMMUTABLE_ONCE_SET.
+ *   Sub-case B: full keypair first import succeeds; re-import of the
+ *               keypair and public-key-only import must fail with
+ *               PROV_R_KEY_IMMUTABLE_ONCE_SET.
+ *
+ * Part 2 — EVP_PKEY_set1_encoded_public_key (ml_kem_set_params):
+ *   The second call on a key that already has a public component must
+ *   also fail with PROV_R_KEY_IMMUTABLE_ONCE_SET..
+ */
+static int test_ml_kem_key_immutable(void)
+{
+    int ret = 0;
+    EVP_PKEY *akey = NULL, *bkey = NULL;
+    EVP_KEYMGMT *keymgmt = NULL;
+    void *keydata = NULL;
+    uint8_t *rawpub = NULL, *rawprv = NULL;
+    size_t publen = 0, prvlen = 0;
+    OSSL_PARAM pub_params[2], keypair_params[3];
+
+    /* Generate a key pair and extract the raw public and private key bytes. */
+    if (!TEST_ptr(akey = EVP_PKEY_Q_keygen(testctx, NULL, "ML-KEM-768")))
+        goto end;
+    if (!TEST_int_eq(EVP_PKEY_get_raw_public_key(akey, NULL, &publen), 1)
+        || !TEST_ptr(rawpub = OPENSSL_malloc(publen))
+        || !TEST_int_eq(EVP_PKEY_get_raw_public_key(akey, rawpub, &publen), 1))
+        goto end;
+    if (!TEST_int_eq(EVP_PKEY_get_raw_private_key(akey, NULL, &prvlen), 1)
+        || !TEST_ptr(rawprv = OPENSSL_malloc(prvlen))
+        || !TEST_int_eq(EVP_PKEY_get_raw_private_key(akey, rawprv, &prvlen), 1))
+        goto end;
+
+    pub_params[0] = OSSL_PARAM_construct_octet_string(
+        OSSL_PKEY_PARAM_PUB_KEY, rawpub, publen);
+    pub_params[1] = OSSL_PARAM_construct_end();
+
+    keypair_params[0] = OSSL_PARAM_construct_octet_string(
+        OSSL_PKEY_PARAM_PRIV_KEY, rawprv, prvlen);
+    keypair_params[1] = OSSL_PARAM_construct_octet_string(
+        OSSL_PKEY_PARAM_PUB_KEY, rawpub, publen);
+    keypair_params[2] = OSSL_PARAM_construct_end();
+
+    if (!TEST_ptr(keymgmt = EVP_KEYMGMT_fetch(testctx, "ML-KEM-768", NULL)))
+        goto end;
+
+    /* --- Part 1A: public-key-only import then re-import --- */
+    if (!TEST_ptr(keydata = evp_keymgmt_newdata(keymgmt, NULL)))
+        goto end;
+
+    if (!TEST_true(evp_keymgmt_import(keymgmt, keydata,
+            OSSL_KEYMGMT_SELECT_PUBLIC_KEY,
+            pub_params)))
+        goto end;
+
+    /* Re-import of the same public key must fail */
+    if (!TEST_false(evp_keymgmt_import(keymgmt, keydata,
+            OSSL_KEYMGMT_SELECT_PUBLIC_KEY,
+            pub_params)))
+        goto end;
+    if (!TEST_int_eq(ERR_GET_REASON(ERR_peek_last_error()),
+            PROV_R_KEY_IMMUTABLE_ONCE_SET))
+        goto end;
+    ERR_clear_error();
+
+    /* Import of a full keypair into a public-key-only key must also fail */
+    if (!TEST_false(evp_keymgmt_import(keymgmt, keydata,
+            OSSL_KEYMGMT_SELECT_KEYPAIR,
+            keypair_params)))
+        goto end;
+    if (!TEST_int_eq(ERR_GET_REASON(ERR_peek_last_error()),
+            PROV_R_KEY_IMMUTABLE_ONCE_SET))
+        goto end;
+    ERR_clear_error();
+
+    evp_keymgmt_freedata(keymgmt, keydata);
+    keydata = NULL;
+
+    /* --- Part 1B: full keypair import then re-import --- */
+    if (!TEST_ptr(keydata = evp_keymgmt_newdata(keymgmt, NULL)))
+        goto end;
+
+    if (!TEST_true(evp_keymgmt_import(keymgmt, keydata,
+            OSSL_KEYMGMT_SELECT_KEYPAIR,
+            keypair_params)))
+        goto end;
+
+    /* Re-import of the same keypair must fail */
+    if (!TEST_false(evp_keymgmt_import(keymgmt, keydata,
+            OSSL_KEYMGMT_SELECT_KEYPAIR,
+            keypair_params)))
+        goto end;
+    if (!TEST_int_eq(ERR_GET_REASON(ERR_peek_last_error()),
+            PROV_R_KEY_IMMUTABLE_ONCE_SET))
+        goto end;
+    ERR_clear_error();
+
+    /* Import of a public-key-only into a full keypair must also fail */
+    if (!TEST_false(evp_keymgmt_import(keymgmt, keydata,
+            OSSL_KEYMGMT_SELECT_PUBLIC_KEY,
+            pub_params)))
+        goto end;
+    if (!TEST_int_eq(ERR_GET_REASON(ERR_peek_last_error()),
+            PROV_R_KEY_IMMUTABLE_ONCE_SET))
+        goto end;
+    ERR_clear_error();
+
+    evp_keymgmt_freedata(keymgmt, keydata);
+    keydata = NULL;
+
+    /* --- Part 2: EVP_PKEY_set1_encoded_public_key immutability --- */
+
+    /*
+     * Create an empty typed key (algorithm set, no key material) by
+     * copying parameters from the generated key.
+     */
+    if (!TEST_ptr(bkey = EVP_PKEY_new())
+        || !TEST_int_gt(EVP_PKEY_copy_parameters(bkey, akey), 0))
+        goto end;
+
+    /* First call must succeed: the key is still embryonic */
+    if (!TEST_int_eq(EVP_PKEY_set1_encoded_public_key(bkey, rawpub, publen), 1))
+        goto end;
+
+    /* Second call must fail: the key now has a public component */
+    if (!TEST_int_eq(EVP_PKEY_set1_encoded_public_key(bkey, rawpub, publen), 0))
+        goto end;
+    if (!TEST_int_eq(ERR_GET_REASON(ERR_peek_last_error()),
+            PROV_R_KEY_IMMUTABLE_ONCE_SET))
+        goto end;
+    ERR_clear_error();
+
+    ret = 1;
+end:
+    if (keymgmt != NULL)
+        evp_keymgmt_freedata(keymgmt, keydata);
+    EVP_KEYMGMT_free(keymgmt);
+    EVP_PKEY_free(akey);
+    EVP_PKEY_free(bkey);
+    OPENSSL_free(rawpub);
+    OPENSSL_free(rawprv);
+    return ret;
+}
+
 int setup_tests(void)
 {
     int test_rand = 0;
@@ -448,5 +669,9 @@ int setup_tests(void)
 
     ADD_TEST(test_ml_kem);
     ADD_TEST(test_ml_kem_from_data_propq);
+    ADD_TEST(test_ml_kem_key_immutable);
+#ifndef OPENSSL_NO_EC
+    ADD_ALL_TESTS(test_mlx_kem_dup_partial_selection, OSSL_NELEM(mlx_kem_algs));
+#endif
     return 1;
 }

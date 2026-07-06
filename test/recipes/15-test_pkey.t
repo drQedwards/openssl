@@ -16,7 +16,7 @@ use OpenSSL::Test qw/:DEFAULT srctop_file/;
 
 setup("test_pkey");
 
-plan tests => 5;
+plan tests => 6;
 
 my @app = ('openssl', 'pkey');
 
@@ -112,18 +112,74 @@ subtest "=== pkey handling of DER encoding ===" => sub {
        "Same file contents after converting to DER and back");
 };
 
-subtest "=== pkey text output ===" => sub {
-    plan tests => 3;
+subtest "=== pkey text and text_pub output ===" => sub {
+    plan tests => 6;
 
     ok((grep /BEGIN PRIVATE KEY/,
         run(app([@app, '-in', $in_key, '-text']), capture => 1)),
         "pkey text output contains PEM header");
 
     ok(!(grep /BEGIN PRIVATE KEY/,
-        run(app([@app, '-in', $in_key, '-text', '-noout']), capture => 1)),
-        "pkey text output with -noout does not contain PEM header");
+         run(app([@app, '-in', $in_key, '-text', '-noout']), capture => 1)),
+         "pkey text output with -noout does not contain PEM header");
 
     ok((grep /Private-Key:/,
         run(app([@app, '-in', $in_key, '-text', '-noout']), capture => 1)),
         "pkey text output (even with -noout) contains \"Private-Key:\"");
+
+    ok(!(grep /Private-Key:/,
+         run(app([@app, '-in', $in_key, '-text_pub', '-noout']), capture => 1)),
+         "-text_pub does not print private key components");
+
+    ok((grep /Public-Key:/,
+        run(app([@app, '-in', $in_key, '-text_pub', '-noout']), capture => 1)),
+        "-text_pub prints public key components");
+
+    ok(!run(app([@app, '-in', $in_key, '-text', '-outform', 'DER',
+                 '-out', 'text_der.tmp'])),
+       "-text combined with DER output is rejected");
+};
+
+subtest "=== pkey EC point conversion form ===" => sub {
+    plan skip_all => "EC not supported in this build" if disabled("ec");
+    plan tests => 8;
+
+    my $ec_key = 'ec_p256.pem';
+    ok(run(app(['openssl', 'genpkey', '-algorithm', 'EC',
+                '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', $ec_key])),
+       "generate P-256 EC key");
+
+    # In a named-curve P-256 SubjectPublicKeyInfo the EC point starts at a
+    # fixed 26-byte offset, so its first octet identifies the conversion form:
+    # 0x04 uncompressed, 0x02/0x03 compressed, 0x06/0x07 hybrid.
+    sub point_lead {
+        open IN, '<', $_[0] or return -1;
+        binmode IN;
+        read IN, my $buf, 27;
+        close IN;
+        return ord substr($buf, 26, 1);
+    }
+
+    my $unc = 'pub_unc.der';
+    ok(run(app([@app, '-in', $ec_key, '-pubout', '-ec_conv_form', 'uncompressed',
+                '-outform', 'DER', '-out', $unc])),
+       "write uncompressed public key");
+    is(point_lead($unc), 0x04, "uncompressed point has 0x04 prefix");
+
+    my $comp = 'pub_comp.der';
+    ok(run(app([@app, '-in', $ec_key, '-pubout', '-ec_conv_form', 'compressed',
+                '-outform', 'DER', '-out', $comp])),
+       "write compressed public key");
+    my $clead = point_lead($comp);
+    ok($clead == 0x02 || $clead == 0x03, "compressed point has 0x02/0x03 prefix");
+
+    my $hyb = 'pub_hyb.der';
+    ok(run(app([@app, '-in', $ec_key, '-pubout', '-ec_conv_form', 'hybrid',
+                '-outform', 'DER', '-out', $hyb])),
+       "write hybrid public key");
+    my $hlead = point_lead($hyb);
+    ok($hlead == 0x06 || $hlead == 0x07, "hybrid point has 0x06/0x07 prefix");
+
+    ok(!run(app([@app, '-in', $in_key, '-ec_conv_form', 'compressed', '-noout'])),
+       "-ec_conv_form on a non-EC key fails");
 };

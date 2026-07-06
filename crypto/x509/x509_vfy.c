@@ -939,7 +939,9 @@ static int check_hosts(X509 *x, X509_VERIFY_PARAM *vpm)
     for (int i = 0; i < n; ++i) {
         size_t len = sk_X509_BUFFER_value(vpm->hosts, i)->len;
         name = sk_X509_BUFFER_value(vpm->hosts, i)->data;
-        if (X509_check_host(x, (const char *)name, len, vpm->hostflags, &vpm->peername) > 0)
+        if (ossl_x509_check_host(x, (const char *)name, len, vpm->hostflags,
+                &vpm->peername)
+            > 0)
             return 1;
     }
     return n <= 0;
@@ -974,7 +976,7 @@ static int check_ips(X509 *x, X509_VERIFY_PARAM *vpm)
     for (int i = 0; i < n; ++i) {
         size_t len = sk_X509_BUFFER_value(vpm->ips, i)->len;
         name = sk_X509_BUFFER_value(vpm->ips, i)->data;
-        if (X509_check_ip(x, name, len, vpm->hostflags) > 0)
+        if (ossl_x509_check_ip(x, name, len, vpm->hostflags) > 0)
             return 1;
     }
     return n <= 0;
@@ -1203,6 +1205,16 @@ static int check_revocation(X509_STORE_CTX *ctx)
 
             /* the issuer certificate is the next in the chain */
             ctx->current_issuer = sk_X509_value(ctx->chain, i + 1);
+            if (ctx->current_issuer == NULL) {
+                /*
+                 * No issuer exists at i+1 — this is the partial-chain
+                 * trust anchor. OCSP requires an issuer to build the
+                 * CertID, so skip OCSP checking for this certificate.
+                 */
+                if ((ctx->param->flags & X509_V_FLAG_PARTIAL_CHAIN) != 0)
+                    continue;
+                return verify_cb_ocsp(ctx, X509_V_ERR_OCSP_VERIFY_FAILED);
+            }
 
             ok = check_cert_ocsp_resp(ctx);
 
@@ -1284,7 +1296,7 @@ static int check_cert_ocsp_resp(X509_STORE_CTX *ctx)
     OCSP_CERTID *sr_cert_id = NULL;
     ASN1_GENERALIZEDTIME *rev, *thisupd, *nextupd;
     ASN1_OBJECT *cert_id_md_oid;
-    EVP_MD *cert_id_md;
+    EVP_MD *cert_id_md = NULL;
     OCSP_CERTID *cert_id = NULL;
     int ret = V_OCSP_CERTSTATUS_UNKNOWN;
     int num;
@@ -1301,6 +1313,7 @@ static int check_cert_ocsp_resp(X509_STORE_CTX *ctx)
 
     if (OCSP_response_status(resp) != OCSP_RESPONSE_STATUS_SUCCESSFUL) {
         OCSP_BASICRESP_free(bs);
+        bs = NULL;
         ret = X509_V_ERR_OCSP_RESP_INVALID;
         goto end;
     }
@@ -1317,13 +1330,17 @@ static int check_cert_ocsp_resp(X509_STORE_CTX *ctx)
         /* determine the md algorithm which was used to create cert id */
         sr_cert_id = (OCSP_CERTID *)OCSP_SINGLERESP_get0_id(sr);
         OCSP_id_get0_info(NULL, &cert_id_md_oid, NULL, NULL, sr_cert_id);
-        if (cert_id_md_oid != NULL)
-            cert_id_md = (EVP_MD *)EVP_get_digestbyobj(cert_id_md_oid);
-        else
-            cert_id_md = NULL;
+        if (cert_id_md_oid != NULL) {
+            char md_name[80];
+
+            if (i2t_ASN1_OBJECT(md_name, sizeof(md_name), cert_id_md_oid) > 0)
+                cert_id_md = EVP_MD_fetch(ctx->libctx, md_name, ctx->propq);
+        }
 
         /* search the stack for the requested OCSP response */
         cert_id = OCSP_cert_to_id(cert_id_md, ctx->current_cert, ctx->current_issuer);
+        EVP_MD_free(cert_id_md);
+        cert_id_md = NULL;
         if (cert_id == NULL) {
             ret = X509_V_ERR_OCSP_RESP_INVALID;
             goto end;
@@ -1676,6 +1693,12 @@ static int get_crl_score(X509_STORE_CTX *ctx, X509 **pissuer,
     /* Invalid IDP cannot be processed */
     if ((crl->idp_flags & IDP_INVALID) != 0)
         return 0;
+    /*
+     * Reject delta CRLs unconditionally here. They are considered by
+     * get_delta_sk() after a base CRL is selected.
+     */
+    if (crl->base_crl_number != NULL)
+        return 0;
     /* Reason codes or indirect CRLs need extended CRL support */
     if ((ctx->param->flags & X509_V_FLAG_EXTENDED_CRL_SUPPORT) == 0) {
         if (crl->idp_flags & (IDP_INDIRECT | IDP_REASONS))
@@ -1685,9 +1708,6 @@ static int get_crl_score(X509_STORE_CTX *ctx, X509 **pissuer,
         if ((crl->idp_reasons & ~tmp_reasons) == 0)
             return 0;
     }
-    /* Don't process deltas at this stage */
-    else if (crl->base_crl_number != NULL)
-        return 0;
     /* If issuer name doesn't match certificate need indirect CRL */
     if (X509_NAME_cmp(X509_get_issuer_name(x), X509_CRL_get_issuer(crl)) != 0) {
         if ((crl->idp_flags & IDP_INDIRECT) == 0)

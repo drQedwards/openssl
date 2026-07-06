@@ -60,6 +60,21 @@ static void down_ref(void *p)
 {
 }
 
+static int counted_up_ref(void *p)
+{
+    int *refs = p;
+
+    (*refs)++;
+    return 1;
+}
+
+static void counted_down_ref(void *p)
+{
+    int *refs = p;
+
+    (*refs)--;
+}
+
 static int test_property_string(void)
 {
     OSSL_LIB_CTX *ctx;
@@ -581,7 +596,7 @@ err:
 
 static int test_query_cache_stochastic(void)
 {
-    const int max = 10000, tail = 10;
+    const int max = 10000;
     OSSL_METHOD_STORE *store;
     int i, res = 0;
     char buf[50];
@@ -619,8 +634,113 @@ static int test_query_cache_stochastic(void)
             || result != v + i)
             errors++;
     }
-    /* There is a tiny probability that this will fail when it shouldn't */
-    res = TEST_int_gt(errors, tail) && TEST_int_lt(errors, max - tail);
+
+    res = TEST_int_eq(errors, 0);
+
+err:
+    ossl_method_store_free(store);
+    return res;
+}
+
+static int test_query_cache_set_duplicate(void)
+{
+    OSSL_METHOD_STORE *store = NULL;
+    int res = 0;
+    int refs = 0;
+    void *result = NULL;
+    OSSL_PROVIDER prov = {
+        .flag_initialized = 1,
+        .flag_activated = 1,
+        .name = "dummy-test-provider"
+    };
+
+    if (!TEST_ptr(store = ossl_method_store_new(NULL))
+        || !TEST_true(ossl_method_store_add(store, &prov, 1, "", &refs,
+            counted_up_ref, counted_down_ref))
+        || !TEST_true(ossl_method_store_cache_set(store, &prov, 1, "", &refs,
+            counted_up_ref,
+            counted_down_ref))
+        || !TEST_int_eq(refs, 3))
+        goto err;
+
+    /*
+     * Re-adding the same cache key exercises cleanup for a temporary generic
+     * QUERY that cannot be inserted because a providerless entry already
+     * exists.  Note: Under the lockless store, the cleanup is an archival operation
+     * That keeps the old entry around until the libctx is freed, as so the refcount
+     * is monotonically incremented here
+     */
+    ossl_method_store_cache_set(store, &prov, 1, "", &refs, counted_up_ref,
+        counted_down_ref);
+    if (!TEST_int_eq(refs, 4)
+        || !TEST_true(ossl_method_store_cache_get(store, &prov, 1, "",
+            &result))
+        || !TEST_ptr_eq(result, &refs))
+        goto err;
+
+#ifdef OPENSSL_NO_CACHED_FETCH
+    counted_down_ref(result);
+#endif
+    result = NULL;
+    res = 1;
+
+err:
+    ossl_method_store_free(store);
+    if (!TEST_int_eq(refs, 0))
+        res = 0;
+    return res;
+}
+
+/*
+ * When two providers cache the same nid and property query, the first one to
+ * do so must own the providerless ("any provider will do") cache entry, so
+ * that a NULL-provider lookup keeps resolving to that provider regardless of
+ * how many other providers subsequently cache the same nid.  This matches the
+ * provider ossl_method_store_fetch would pick by implementation order.
+ */
+static int test_query_cache_provider_order(void)
+{
+    OSSL_METHOD_STORE *store = NULL;
+    int res = 0;
+    int method1 = 0, method2 = 0;
+    void *result = NULL;
+    OSSL_PROVIDER prov1 = {
+        .flag_initialized = 1,
+        .flag_activated = 1,
+        .name = "first-provider"
+    };
+    OSSL_PROVIDER prov2 = {
+        .flag_initialized = 1,
+        .flag_activated = 1,
+        .name = "second-provider"
+    };
+
+    if (!TEST_ptr(store = ossl_method_store_new(NULL)))
+        goto err;
+
+    /* prov1 caches the nid first, so it owns the providerless entry. */
+    if (!TEST_true(ossl_method_store_cache_set(store, &prov1, 1, "", &method1,
+            up_ref, down_ref))
+        || !TEST_true(ossl_method_store_cache_set(store, &prov2, 1, "",
+            &method2, up_ref, down_ref)))
+        goto err;
+
+    /* A NULL-provider ("any provider") lookup must resolve to prov1. */
+    if (!TEST_true(ossl_method_store_cache_get(store, NULL, 1, "", &result))
+        || !TEST_ptr_eq(result, &method1))
+        goto err;
+
+    /* Provider-specific lookups must still return each provider's method. */
+    result = NULL;
+    if (!TEST_true(ossl_method_store_cache_get(store, &prov1, 1, "", &result))
+        || !TEST_ptr_eq(result, &method1))
+        goto err;
+    result = NULL;
+    if (!TEST_true(ossl_method_store_cache_get(store, &prov2, 1, "", &result))
+        || !TEST_ptr_eq(result, &method2))
+        goto err;
+
+    res = 1;
 
 err:
     ossl_method_store_free(store);
@@ -739,6 +859,8 @@ int setup_tests(void)
     ADD_TEST(test_register_deregister);
     ADD_TEST(test_property);
     ADD_TEST(test_query_cache_stochastic);
+    ADD_TEST(test_query_cache_set_duplicate);
+    ADD_TEST(test_query_cache_provider_order);
     ADD_TEST(test_fips_mode);
     ADD_ALL_TESTS(test_property_list_to_string, OSSL_NELEM(to_string_tests));
     ADD_TEST(test_property_list_to_string_bounds);

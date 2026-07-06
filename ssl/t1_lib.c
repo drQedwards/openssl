@@ -1263,9 +1263,14 @@ typedef struct {
     size_t gidmax; /* The memory allocation chunk size for the group IDs */
     size_t gidcnt; /* Number of groups */
     uint16_t *gid_arr; /* The IDs of the supported groups (flat list) */
-    size_t tplmax; /* The memory allocation chunk size for the tuple counters */
-    size_t tplcnt; /* Number of tuples */
-    size_t *tuplcnt_arr; /* The number of groups inside a tuple */
+    size_t tplmax; /* Allocated length of tuplcnt_arr */
+    /*
+     * Number of *closed* (fully parsed) tuples.  During parsing there is
+     * always one additional active tuple being built, stored at index tplcnt.
+     * tuplcnt_arr therefore always needs at least tplcnt + 1 allocated slots.
+     */
+    size_t tplcnt;
+    size_t *tuplcnt_arr; /* Per-tuple group counts; [0..tplcnt-1] closed, [tplcnt] active */
     size_t ksidmax; /* The memory allocation chunk size */
     size_t ksidcnt; /* Number of key shares */
     uint16_t *ksid_arr; /* The IDs of the key share groups (flat list) */
@@ -1599,9 +1604,18 @@ done:
     return retval;
 }
 
+/*
+ * Ensure tuplcnt_arr has room for at least tplcnt + 2 entries so that
+ * close_tuple() can safely increment tplcnt and write the new active-tuple
+ * slot at index tplcnt + 1.  Must be called before that increment.
+ */
 static int grow_tuples(gid_cb_st *garg)
 {
-    if (garg->tplcnt == garg->tplmax) {
+    /*
+     * tplcnt + 1 is the index close_tuple() will write to after incrementing;
+     * reallocate before it would reach the end of the allocated array.
+     */
+    if (garg->tplcnt + 1 >= garg->tplmax) {
         size_t *tmp = OPENSSL_realloc_array(garg->tuplcnt_arr,
             garg->tplmax + GROUPLIST_INCREMENT,
             sizeof(*garg->tuplcnt_arr));
@@ -1614,6 +1628,13 @@ static int grow_tuples(gid_cb_st *garg)
     return 1;
 }
 
+/*
+ * Finalise the active tuple (at index tplcnt) and open a fresh one.
+ * tplcnt is the count of closed tuples; the active tuple lives at tplcnt
+ * throughout parsing.  After this call tplcnt is incremented and the new
+ * active tuple at the updated index is initialised to 0.
+ * Empty tuples (gidcnt == 0) are discarded without advancing tplcnt.
+ */
 static int close_tuple(gid_cb_st *garg)
 {
     size_t gidcnt = garg->tuplcnt_arr[garg->tplcnt];
@@ -1622,19 +1643,22 @@ static int close_tuple(gid_cb_st *garg)
         uint16_t gid = garg->gid_arr[garg->gidcnt - gidcnt];
 
         /*
-         * All groups in tuple marked for keyshare prediction were unknown
-         * select the first known group in the tuple.
+         * All groups in the tuple that were marked for keyshare prediction
+         * were unknown (unrecognised); select the first known group instead.
          */
         garg->ksid_arr[garg->ksidcnt++] = gid;
     }
-    /* Reset for the next tuple */
+    /* Reset keyshare state for the next tuple */
     garg->want_keyshare = 0;
 
     if (gidcnt == 0)
-        return 1;
+        return 1; /* Discard empty tuple; no need to open a new slot */
+
+    /* Grow before the increment: the new active slot will be at tplcnt + 1 */
     if (!grow_tuples(garg))
         return 0;
 
+    /* Promote closed tuple and initialise the new active tuple slot */
     garg->tuplcnt_arr[++garg->tplcnt] = 0;
     return 1;
 }
@@ -2249,16 +2273,14 @@ static const SIGALG_LOOKUP sigalg_lookup_tbl[] = {
         TLS1_2_VERSION, TLS1_2_VERSION, DTLS1_2_VERSION, DTLS1_2_VERSION },
 
 #ifndef OPENSSL_NO_GOST
-    { TLSEXT_SIGALG_gostr34102012_256_intrinsic_alias, /* RFC9189 */
-        TLSEXT_SIGALG_gostr34102012_256_intrinsic_name,
-        TLSEXT_SIGALG_gostr34102012_256_intrinsic,
+    { TLSEXT_SIGALG_gostr34102012_256_intrinsic_name, /* RFC9189 */
+        NULL, TLSEXT_SIGALG_gostr34102012_256_intrinsic,
         NID_id_GostR3411_2012_256, SSL_MD_GOST12_256_IDX,
         NID_id_GostR3410_2012_256, SSL_PKEY_GOST12_256,
         NID_undef, NID_undef, 1, 0,
         TLS1_2_VERSION, TLS1_2_VERSION, DTLS1_2_VERSION, DTLS1_2_VERSION },
-    { TLSEXT_SIGALG_gostr34102012_256_intrinsic_alias, /* RFC9189 */
-        TLSEXT_SIGALG_gostr34102012_256_intrinsic_name,
-        TLSEXT_SIGALG_gostr34102012_512_intrinsic,
+    { TLSEXT_SIGALG_gostr34102012_512_intrinsic_name, /* RFC9189 */
+        NULL, TLSEXT_SIGALG_gostr34102012_512_intrinsic,
         NID_id_GostR3411_2012_512, SSL_MD_GOST12_512_IDX,
         NID_id_GostR3410_2012_512, SSL_PKEY_GOST12_512,
         NID_undef, NID_undef, 1, 0,
@@ -3030,12 +3052,11 @@ int ssl_set_client_disabled(SSL_CONNECTION *s)
  * @s: SSL connection that you want to use the cipher on
  * @c: cipher to check
  * @op: Security check that you want to do
- * @ecdhe: If set to 1 then TLSv1 ECDHE ciphers are also allowed in SSLv3
  *
  * Returns 1 when it's disabled, 0 when enabled.
  */
 int ssl_cipher_disabled(const SSL_CONNECTION *s, const SSL_CIPHER *c,
-    int op, int ecdhe)
+    int op)
 {
     int minversion = SSL_CONNECTION_IS_DTLS(s) ? c->min_dtls : c->min_tls;
     int maxversion = SSL_CONNECTION_IS_DTLS(s) ? c->max_dtls : c->max_tls;
@@ -3056,15 +3077,6 @@ int ssl_cipher_disabled(const SSL_CONNECTION *s, const SSL_CIPHER *c,
         default:
             return 1;
         }
-
-    /*
-     * For historical reasons we will allow ECHDE to be selected by a server
-     * in SSLv3 if we are a client
-     */
-    if (minversion == TLS1_VERSION
-        && ecdhe
-        && (c->algorithm_mkey & (SSL_kECDHE | SSL_kECDHEPSK)) != 0)
-        minversion = SSL3_VERSION;
 
     if (ssl_version_cmp(s, minversion, s->s3.tmp.max_ver) > 0
         || ssl_version_cmp(s, maxversion, s->s3.tmp.min_ver) < 0)
@@ -3208,7 +3220,7 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
     SSL_TICKET_STATUS ret = SSL_TICKET_FATAL_ERR_OTHER;
     size_t mlen;
     unsigned char tick_hmac[EVP_MAX_MD_SIZE];
-    SSL_HMAC *hctx = NULL;
+    SSL_HMAC hctx, *constructed_hctx = NULL;
     EVP_CIPHER_CTX *ctx = NULL;
     SSL_CTX *tctx = s->session_ctx;
     SSL_CTX *sctx = SSL_CONNECTION_GET_CTX(s);
@@ -3239,8 +3251,8 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
     }
 
     /* Initialize session ticket encryption and HMAC contexts */
-    hctx = ssl_hmac_new(tctx);
-    if (hctx == NULL) {
+
+    if ((constructed_hctx = ssl_hmac_construct(tctx, &hctx)) == NULL) {
         ret = SSL_TICKET_FATAL_ERR_MALLOC;
         goto end;
     }
@@ -3263,14 +3275,14 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
                 nctick,
                 nctick + TLSEXT_KEYNAME_LENGTH,
                 ctx,
-                ssl_hmac_get0_EVP_MAC_CTX(hctx),
+                ssl_hmac_get0_EVP_MAC_CTX(&hctx),
                 0);
 #ifndef OPENSSL_NO_DEPRECATED_3_0
         else if (tctx->ext.ticket_key_cb != NULL)
             /* if 0 is returned, write an empty ticket */
             rv = tctx->ext.ticket_key_cb(SSL_CONNECTION_GET_USER_SSL(s), nctick,
                 nctick + TLSEXT_KEYNAME_LENGTH,
-                ctx, ssl_hmac_get0_HMAC_CTX(hctx), 0);
+                ctx, ssl_hmac_get0_HMAC_CTX(&hctx), 0);
 #endif
         if (rv < 0) {
             ret = SSL_TICKET_FATAL_ERR_OTHER;
@@ -3283,8 +3295,6 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
         if (rv == 2)
             renew_ticket = 1;
     } else {
-        EVP_CIPHER *aes256cbc = NULL;
-
         /* Check key name matches */
         if (memcmp(etick, tctx->ext.tick_key_name,
                 TLSEXT_KEYNAME_LENGTH)
@@ -3293,22 +3303,16 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
             goto end;
         }
 
-        aes256cbc = EVP_CIPHER_fetch(sctx->libctx, "AES-256-CBC",
-            sctx->propq);
-        if (aes256cbc == NULL
-            || ssl_hmac_init(hctx, tctx->ext.secure->tick_hmac_key,
-                   sizeof(tctx->ext.secure->tick_hmac_key),
-                   "SHA256")
+        if (ssl_hmac_init(&hctx, tctx->ext.secure->tick_hmac_key,
+                sizeof(tctx->ext.secure->tick_hmac_key), "SHA256")
                 <= 0
-            || EVP_DecryptInit_ex(ctx, aes256cbc, NULL,
+            || EVP_DecryptInit_ex(ctx, tctx->tktenc, NULL,
                    tctx->ext.secure->tick_aes_key,
                    etick + TLSEXT_KEYNAME_LENGTH)
                 <= 0) {
-            EVP_CIPHER_free(aes256cbc);
             ret = SSL_TICKET_FATAL_ERR_OTHER;
             goto end;
         }
-        EVP_CIPHER_free(aes256cbc);
         if (SSL_CONNECTION_IS_TLS13(s))
             renew_ticket = 1;
     }
@@ -3316,7 +3320,7 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
      * Attempt to process session ticket, first conduct sanity and integrity
      * checks on ticket.
      */
-    mlen = ssl_hmac_size(hctx);
+    mlen = ssl_hmac_size(&hctx);
     if (mlen == 0) {
         ret = SSL_TICKET_FATAL_ERR_OTHER;
         goto end;
@@ -3335,8 +3339,8 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
     }
     eticklen -= mlen;
     /* Check HMAC of encrypted ticket */
-    if (ssl_hmac_update(hctx, etick, eticklen) <= 0
-        || ssl_hmac_final(hctx, tick_hmac, NULL, sizeof(tick_hmac)) <= 0) {
+    if (ssl_hmac_update(&hctx, etick, eticklen) <= 0
+        || ssl_hmac_final(&hctx, tick_hmac, NULL, sizeof(tick_hmac)) <= 0) {
         ret = SSL_TICKET_FATAL_ERR_OTHER;
         goto end;
     }
@@ -3398,7 +3402,7 @@ SSL_TICKET_STATUS tls_decrypt_ticket(SSL_CONNECTION *s,
 
 end:
     EVP_CIPHER_CTX_free(ctx);
-    ssl_hmac_free(hctx);
+    ssl_hmac_destruct(constructed_hctx);
 
     /*
      * If set, the decrypt_ticket_cb() is called unless a fatal error was
@@ -3523,7 +3527,7 @@ static int tls12_sigalg_allowed(const SSL_CONNECTION *s, int op,
 
                 c = sk_SSL_CIPHER_value(sk, i);
                 /* Skip disabled ciphers */
-                if (ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_SUPPORTED, 0))
+                if (ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_SUPPORTED))
                     continue;
 
                 if ((c->algorithm_mkey & (SSL_kGOST | SSL_kGOST18)) != 0)
@@ -4571,51 +4575,29 @@ static int ssl_security_cert_key(SSL_CONNECTION *s, SSL_CTX *ctx, X509 *x,
         return ssl_ctx_security(ctx, op, secbits, 0, x);
 }
 
-static int ssl_security_cert_sig(SSL_CONNECTION *s, SSL_CTX *ctx, X509 *x,
-    int op)
+int ssl_security_cert(SSL_CONNECTION *s, SSL_CTX *ctx, X509 *x, int is_ee)
 {
-    /* Lookup signature algorithm digest */
-    int secbits, nid, pknid;
-
-    /* Don't check signature if self signed */
-    if ((X509_get_extension_flags(x) & EXFLAG_SS) != 0)
-        return 1;
-    if (!X509_get_signature_info(x, &nid, &pknid, &secbits, NULL))
-        secbits = -1;
-    /* If digest NID not defined use signature NID */
-    if (nid == NID_undef)
-        nid = pknid;
-    if (s != NULL)
-        return ssl_security(s, op, secbits, nid, x);
-    else
-        return ssl_ctx_security(ctx, op, secbits, nid, x);
-}
-
-int ssl_security_cert(SSL_CONNECTION *s, SSL_CTX *ctx, X509 *x, int vfy,
-    int is_ee)
-{
-    if (vfy)
-        vfy = SSL_SECOP_PEER;
     if (is_ee) {
-        if (!ssl_security_cert_key(s, ctx, x, SSL_SECOP_EE_KEY | vfy))
+        if (!ssl_security_cert_key(s, ctx, x, SSL_SECOP_EE_KEY))
             return SSL_R_EE_KEY_TOO_SMALL;
     } else {
-        if (!ssl_security_cert_key(s, ctx, x, SSL_SECOP_CA_KEY | vfy))
+        if (!ssl_security_cert_key(s, ctx, x, SSL_SECOP_CA_KEY))
             return SSL_R_CA_KEY_TOO_SMALL;
     }
-    if (!ssl_security_cert_sig(s, ctx, x, SSL_SECOP_CA_MD | vfy))
-        return SSL_R_CA_MD_TOO_WEAK;
     return 1;
 }
 
 /*
- * Check security of a chain, if |sk| includes the end entity certificate then
- * |x| is NULL. If |vfy| is 1 then we are verifying a peer chain and not sending
- * one to the peer. Return values: 1 if ok otherwise error code to use
+ * Call ssl_security_check() on all certificates in a stack.
+ * If |x| is non NULL it is checked first, before checking the
+ * certificates in the stack.
+ *
+ * Return values: 1 if ok otherwise the error code from the first
+ * failing ssl_security_check().;
  */
 
 int ssl_security_cert_chain(SSL_CONNECTION *s, STACK_OF(X509) *sk,
-    X509 *x, int vfy)
+    X509 *x)
 {
     int rv, start_idx, i;
 
@@ -4627,13 +4609,13 @@ int ssl_security_cert_chain(SSL_CONNECTION *s, STACK_OF(X509) *sk,
     } else
         start_idx = 0;
 
-    rv = ssl_security_cert(s, NULL, x, vfy, 1);
+    rv = ssl_security_cert(s, NULL, x, 1);
     if (rv != 1)
         return rv;
 
     for (i = start_idx; i < sk_X509_num(sk); i++) {
         x = sk_X509_value(sk, i);
-        rv = ssl_security_cert(s, NULL, x, vfy, 0);
+        rv = ssl_security_cert(s, NULL, x, 0);
         if (rv != 1)
             return rv;
     }
@@ -5012,41 +4994,28 @@ uint8_t SSL_SESSION_get_max_fragment_length(const SSL_SESSION *session)
 /*
  * Helper functions for HMAC access with legacy support included.
  */
-SSL_HMAC *ssl_hmac_new(const SSL_CTX *ctx)
+SSL_HMAC *ssl_hmac_construct(const SSL_CTX *ctx, SSL_HMAC *hctx)
 {
-    SSL_HMAC *ret = OPENSSL_zalloc(sizeof(*ret));
-    EVP_MAC *mac = NULL;
-
-    if (ret == NULL)
+    if (hctx == NULL)
         return NULL;
+    hctx->ctx = NULL;
 #ifndef OPENSSL_NO_DEPRECATED_3_0
+    hctx->old_ctx = NULL;
     if (ctx->ext.ticket_key_evp_cb == NULL
-        && ctx->ext.ticket_key_cb != NULL) {
-        if (!ssl_hmac_old_new(ret))
-            goto err;
-        return ret;
-    }
+        && ctx->ext.ticket_key_cb != NULL)
+        return ssl_hmac_old_construct(hctx);
 #endif
-    mac = EVP_MAC_fetch(ctx->libctx, "HMAC", ctx->propq);
-    if (mac == NULL || (ret->ctx = EVP_MAC_CTX_new(mac)) == NULL)
-        goto err;
-    EVP_MAC_free(mac);
-    return ret;
-err:
-    EVP_MAC_CTX_free(ret->ctx);
-    EVP_MAC_free(mac);
-    OPENSSL_free(ret);
-    return NULL;
+    hctx->ctx = EVP_MAC_CTX_new(ctx->hmac);
+    return hctx->ctx != NULL ? hctx : NULL;
 }
 
-void ssl_hmac_free(SSL_HMAC *ctx)
+void ssl_hmac_destruct(SSL_HMAC *ctx)
 {
     if (ctx != NULL) {
         EVP_MAC_CTX_free(ctx->ctx);
 #ifndef OPENSSL_NO_DEPRECATED_3_0
-        ssl_hmac_old_free(ctx);
+        ssl_hmac_old_destruct(ctx);
 #endif
-        OPENSSL_free(ctx);
     }
 }
 

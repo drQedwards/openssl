@@ -63,6 +63,8 @@
 #define DTLS_VERSION_GE(v1, v2) (dtls_ver_ordinal(v1) <= dtls_ver_ordinal(v2))
 #define DTLS_VERSION_LT(v1, v2) (dtls_ver_ordinal(v1) > dtls_ver_ordinal(v2))
 #define DTLS_VERSION_LE(v1, v2) (dtls_ver_ordinal(v1) >= dtls_ver_ordinal(v2))
+/* TLS/DTLS version for the given SSL object: XTLS(ssl, 1, 2) == TLS 1.2 or DTLS 1.2 */
+#define XTLS(ssl, m, n) (SSL_is_dtls(ssl) ? (((0xFF - m) << 8) | (0xFF - n)) : (((0x02 + m) << 8) | (0x01 + n)))
 
 #define SSL_AD_NO_ALERT -1
 
@@ -385,7 +387,7 @@ typedef enum {
     SSL_PHA_REQUESTED /* request received by client, or sent by server */
 } SSL_PHA_STATE;
 
-/* CipherSuite length. SSLv3 and all TLS versions. */
+/* CipherSuite value length. */
 #define TLS_CIPHER_LEN 2
 /* used to hold info on the particular ciphers used */
 struct ssl_cipher_st {
@@ -445,7 +447,7 @@ struct ssl_method_st {
     int (*num_ciphers)(void);
     const SSL_CIPHER *(*get_cipher)(unsigned ncipher);
     OSSL_TIME (*get_timeout)(void);
-    const struct ssl3_enc_method *ssl3_enc; /* Extra SSLv3/TLS stuff */
+    const struct ssl3_enc_method *ssl3_enc; /* Extra TLS stuff */
     int (*ssl_version)(void);
     long (*ssl_callback_ctrl)(SSL *s, int cb_id, void (*fp)(void));
     long (*ssl_ctx_callback_ctrl)(SSL_CTX *s, int cb_id, void (*fp)(void));
@@ -740,8 +742,8 @@ typedef struct ssl_hmac_st {
 #endif
 } SSL_HMAC;
 
-SSL_HMAC *ssl_hmac_new(const SSL_CTX *ctx);
-void ssl_hmac_free(SSL_HMAC *ctx);
+SSL_HMAC *ssl_hmac_construct(const SSL_CTX *ctx, SSL_HMAC *hctx);
+void ssl_hmac_destruct(SSL_HMAC *ctx);
 #ifndef OPENSSL_NO_DEPRECATED_3_0
 HMAC_CTX *ssl_hmac_get0_HMAC_CTX(SSL_HMAC *ctx);
 #endif
@@ -807,6 +809,14 @@ typedef struct {
 
 #define TLS_GROUP_FFDHE_FOR_TLS1_3 (TLS_GROUP_FFDHE | TLS_GROUP_ONLY_FOR_TLS1_3)
 
+#if !defined(OPENSSL_NO_TLS1)      \
+    || !defined(OPENSSL_NO_TLS1_1) \
+    || !defined(OPENSSL_NO_TLS1_2) \
+    || !defined(OPENSSL_NO_DTLS1)  \
+    || !defined(OPENSSL_NO_DTLS1_2)
+#define OPENSSL_HAVE_TLS1PRF
+#endif
+
 struct ssl_ctx_st {
     OSSL_LIB_CTX *libctx;
 
@@ -818,6 +828,12 @@ struct ssl_ctx_st {
     STACK_OF(SSL_CIPHER) *tls13_ciphersuites;
     struct x509_store_st /* X509_STORE */ *cert_store;
     LHASH_OF(SSL_SESSION) *sessions;
+    EVP_MAC *hmac;
+    EVP_MD *sha256;
+    EVP_CIPHER *tktenc;
+#ifdef OPENSSL_HAVE_TLS1PRF
+    EVP_KDF *tls1prf;
+#endif
     /*
      * Most session-ids that will be cached, default is
      * SSL_SESSION_CACHE_MAX_SIZE_DEFAULT. 0 is unlimited.
@@ -911,11 +927,8 @@ struct ssl_ctx_st {
 
     CRYPTO_EX_DATA ex_data;
 
-    const EVP_MD *md5; /* For SSLv3/TLSv1 'ssl3-md5' */
-    const EVP_MD *sha1; /* For SSLv3/TLSv1 'ssl3-sha1' */
-
     STACK_OF(X509) *extra_certs;
-    STACK_OF(SSL_COMP) *comp_methods; /* stack of SSL_COMP, SSLv3/TLSv1 */
+    STACK_OF(SSL_COMP) *comp_methods; /* stack of SSL_COMP, TLSv1 */
 
     /* Default values used when no per-SSL value is defined follow */
 
@@ -1263,8 +1276,7 @@ struct ssl_connection_st {
     SSL *user_ssl;
 
     /*
-     * protocol version (one of SSL2_VERSION, SSL3_VERSION, TLS1_VERSION,
-     * DTLS1_VERSION)
+     * protocol version (one of TLS1_VERSION, DTLS1_VERSION)
      */
     int version;
     /*
@@ -1359,7 +1371,7 @@ struct ssl_connection_st {
         int in_read_app_data;
 
         struct {
-            /* actually only need to be 16+20 for SSLv3 and 12 for TLS */
+            /* actually only need to be 12 for TLS */
             unsigned char finish_md[EVP_MAX_MD_SIZE * 2];
             size_t finish_md_len;
             unsigned char peer_finish_md[EVP_MAX_MD_SIZE * 2];
@@ -1610,7 +1622,7 @@ struct ssl_connection_st {
     int first_packet;
     /*
      * What was passed in ClientHello.legacy_version. Used for RSA pre-master
-     * secret and SSLv3/TLS (<=1.2) rollback check
+     * secret and (D)TLS (<=1.2) rollback check
      */
     int client_version;
     /*
@@ -2167,8 +2179,7 @@ typedef struct cert_st {
 } CERT;
 
 /*
- * This is for the SSLv3/TLSv1.0 differences in crypto/hash stuff It is a bit
- * of a mess of functions, but hell, think of it as an opaque structure :-)
+ * This is for the TLSv1.0 differences in crypto/hash stuff.
  */
 typedef struct ssl3_enc_method {
     int (*setup_key_block)(SSL_CONNECTION *);
@@ -2805,10 +2816,9 @@ __owur int ssl_validate_ct(SSL_CONNECTION *s);
 
 __owur EVP_PKEY *ssl_get_auto_dh(SSL_CONNECTION *s);
 
-__owur int ssl_security_cert(SSL_CONNECTION *s, SSL_CTX *ctx, X509 *x, int vfy,
-    int is_ee);
+__owur int ssl_security_cert(SSL_CONNECTION *s, SSL_CTX *ctx, X509 *x, int is_ee);
 __owur int ssl_security_cert_chain(SSL_CONNECTION *s, STACK_OF(X509) *sk,
-    X509 *ex, int vfy);
+    X509 *ex);
 
 int tls_choose_sigalg(SSL_CONNECTION *s, int fatalerrs);
 
@@ -2827,7 +2837,7 @@ __owur int tls_check_sigalg_curve(const SSL_CONNECTION *s, int curve);
 __owur int tls12_check_peer_sigalg(SSL_CONNECTION *s, uint16_t, EVP_PKEY *pkey);
 __owur int ssl_set_client_disabled(SSL_CONNECTION *s);
 __owur int ssl_cipher_disabled(const SSL_CONNECTION *s, const SSL_CIPHER *c,
-    int op, int echde);
+    int op);
 
 __owur int ssl_handshake_hash(SSL_CONNECTION *s,
     unsigned char *out, size_t outlen,
@@ -2923,8 +2933,8 @@ void ssl_evp_cipher_free(const EVP_CIPHER *cipher);
 int ssl_evp_md_up_ref(const EVP_MD *md);
 void ssl_evp_md_free(const EVP_MD *md);
 
-int ssl_hmac_old_new(SSL_HMAC *ret);
-void ssl_hmac_old_free(SSL_HMAC *ctx);
+SSL_HMAC *ssl_hmac_old_construct(SSL_HMAC *ret);
+void ssl_hmac_old_destruct(SSL_HMAC *ctx);
 int ssl_hmac_old_init(SSL_HMAC *ctx, void *key, size_t len, char *md);
 int ssl_hmac_old_update(SSL_HMAC *ctx, const unsigned char *data, size_t len);
 int ssl_hmac_old_final(SSL_HMAC *ctx, unsigned char *md, size_t *len);

@@ -74,8 +74,8 @@ static ASN1_OCTET_STRING *pkcs7_get1_data(PKCS7 *p7)
     if (PKCS7_type_is_other(p7) && (p7->d.other != NULL)
         && (p7->d.other->type == V_ASN1_SEQUENCE)
         && (p7->d.other->value.sequence != NULL)
-        && (p7->d.other->value.sequence->length > 0)) {
-        const unsigned char *data = p7->d.other->value.sequence->data;
+        && (ASN1_STRING_length(p7->d.other->value.sequence) > 0)) {
+        const unsigned char *data = ASN1_STRING_get0_data(p7->d.other->value.sequence);
         long len;
         int inf, tag, class;
 
@@ -83,7 +83,7 @@ static ASN1_OCTET_STRING *pkcs7_get1_data(PKCS7 *p7)
         if (os == NULL)
             return NULL;
         inf = ASN1_get_object(&data, &len, &tag, &class,
-            p7->d.other->value.sequence->length);
+            ASN1_STRING_length(p7->d.other->value.sequence));
         if (inf != V_ASN1_CONSTRUCTED || tag != V_ASN1_SEQUENCE
             || !ASN1_OCTET_STRING_set(os, data, len)) {
             ASN1_OCTET_STRING_free(os);
@@ -197,15 +197,8 @@ static int pkcs7_decrypt_rinfo(unsigned char **pek, int *peklen,
     if (EVP_PKEY_decrypt_init(pctx) <= 0)
         goto err;
 
-    if (EVP_PKEY_is_a(pkey, "RSA"))
-        /* upper layer pkcs7 code incorrectly assumes that a successful RSA
-         * decryption means that the key matches ciphertext (which never
-         * was the case, implicit rejection or not), so to make it work
-         * disable implicit rejection for RSA keys */
-        EVP_PKEY_CTX_ctrl_str(pctx, "rsa_pkcs1_implicit_rejection", "0");
-
     ret = evp_pkey_decrypt_alloc(pctx, &ek, &eklen, fixlen,
-        ri->enc_key->data, ri->enc_key->length);
+        ASN1_STRING_get0_data(ri->enc_key), ASN1_STRING_length(ri->enc_key));
     if (ret <= 0)
         goto err;
 
@@ -378,7 +371,7 @@ BIO *PKCS7_dataInit(PKCS7 *p7, BIO *bio)
     if (bio == NULL) {
         if (PKCS7_is_detached(p7)) {
             bio = BIO_new(BIO_s_null());
-        } else if (os != NULL && os->length > 0) {
+        } else if (os != NULL && ASN1_STRING_length(os) > 0) {
             /*
              * bio needs a copy of os->data instead of a pointer because
              * the data will be used after os has been freed
@@ -386,7 +379,9 @@ BIO *PKCS7_dataInit(PKCS7 *p7, BIO *bio)
             bio = BIO_new(BIO_s_mem());
             if (bio != NULL) {
                 BIO_set_mem_eof_return(bio, 0);
-                if (BIO_write(bio, os->data, os->length) != os->length) {
+                const unsigned char *os_data = ASN1_STRING_get0_data(os);
+                int os_len = ASN1_STRING_length(os);
+                if (BIO_write(bio, os_data, os_len) != os_len) {
                     BIO_free_all(bio);
                     bio = NULL;
                 }
@@ -661,8 +656,10 @@ BIO *PKCS7_dataDecode(PKCS7 *p7, EVP_PKEY *pkey, BIO *in_bio, X509 *pcert)
     if (in_bio != NULL) {
         bio = in_bio;
     } else {
-        if (data_body->length > 0)
-            bio = BIO_new_mem_buf(data_body->data, data_body->length);
+        int data_body_len = ASN1_STRING_length(data_body);
+        if (data_body_len > 0)
+            bio = BIO_new_mem_buf(ASN1_STRING_get0_data(data_body),
+                data_body_len);
         else {
             bio = BIO_new(BIO_s_mem());
             if (bio == NULL)
@@ -1113,7 +1110,8 @@ int PKCS7_signatureVerify(BIO *bio, PKCS7 *p7, PKCS7_SIGNER_INFO *si,
             ERR_raise(ERR_LIB_PKCS7, PKCS7_R_UNABLE_TO_FIND_MESSAGE_DIGEST);
             goto err;
         }
-        if ((message_digest->length != (int)md_len) || (memcmp(message_digest->data, md_dat, md_len))) {
+        if ((ASN1_STRING_length(message_digest) != (int)md_len)
+            || (memcmp(ASN1_STRING_get0_data(message_digest), md_dat, md_len))) {
             ERR_raise(ERR_LIB_PKCS7, PKCS7_R_DIGEST_FAILURE);
             ret = -1;
             goto err;
@@ -1143,7 +1141,9 @@ int PKCS7_signatureVerify(BIO *bio, PKCS7 *p7, PKCS7_SIGNER_INFO *si,
         goto err;
     }
 
-    i = EVP_VerifyFinal_ex(mdc_tmp, os->data, os->length, pkey, libctx, propq);
+    const unsigned char *sig_data = ASN1_STRING_get0_data(os);
+    int sig_len = ASN1_STRING_length(os);
+    i = EVP_VerifyFinal_ex(mdc_tmp, sig_data, sig_len, pkey, libctx, propq);
     if (i <= 0) {
         ERR_raise(ERR_LIB_PKCS7, PKCS7_R_SIGNATURE_FAILURE);
         ret = -1;
@@ -1171,7 +1171,7 @@ PKCS7_ISSUER_AND_SERIAL *PKCS7_get_issuer_and_serial(PKCS7 *p7, int idx)
     rsk = p7->d.signed_and_enveloped->recipientinfo;
     if (rsk == NULL)
         return NULL;
-    if (sk_PKCS7_RECIP_INFO_num(rsk) <= idx)
+    if (idx < 0 || sk_PKCS7_RECIP_INFO_num(rsk) <= idx)
         return NULL;
     ri = sk_PKCS7_RECIP_INFO_value(rsk, idx);
     return ri->issuer_and_serial;

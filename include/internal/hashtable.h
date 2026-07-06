@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <openssl/e_os2.h>
 #include <internal/rcu.h>
 #include "crypto/context.h"
@@ -356,7 +357,7 @@ static ossl_inline ossl_unused void ossl_ht_strcase(HT_KEY *key, char *tgt, cons
     if (key != NULL && key->keysize + len > key->bufsize)
         len = (size_t)(key->bufsize - key->keysize);
 
-    for (i = 0; src[i] != '\0' && i < len; i++)
+    for (i = 0; i < len && src[i] != '\0'; i++)
         tgt[i] = case_adjust & src[i];
 }
 
@@ -398,7 +399,9 @@ int ossl_ht_flush(HT *htable);
 /*
  * Inserts an element to a hash table, optionally returning
  * replaced data to caller
- * Returns 1 if the insert was successful, 0 on error
+ * Returns 1 if the insert was successful, 0 on duplicate without
+ * replacement, invalid input, or another non-allocation failure, and -1
+ * on allocation failure or if the table could not be grown.
  */
 int ossl_ht_insert(HT *htable, HT_KEY *key, HT_VALUE *data,
     HT_VALUE **olddata);

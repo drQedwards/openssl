@@ -11,6 +11,7 @@
      our $makedepcmd = platform->makedepcmd();
 
      sub windowsdll { $config{target} =~ /^(?:Cygwin|mingw)/ }
+     sub run_on_windows { $^O =~ /^(?:cygwin|msys|MSWin32)/ }
 
      # Shared AIX support is special. We put libcrypto[64].so.ver into
      # libcrypto.a and use libcrypto_a.a as static one, unless using
@@ -600,6 +601,12 @@ list-tests: ## List available tests that can be invoked via "make test TESTS=<na
 
 ##@ Workspace cleaning
 
+cov-clean: ## Remove all coverage data files
+	-find . \( -name '*.gcda' -o -name '*.gcno' \) \! -type d | xargs $(RM)
+
+cov-reset: ## Remove runtime coverage counters
+	-find . -name '*.gcda' \! -type d | xargs $(RM)
+
 libclean:
 	@set -e; for s in $(SHLIB_INFO); do \
 		if [ "$$s" = ";" ]; then continue; fi; \
@@ -634,15 +641,32 @@ clean: libclean ## Clean the workspace, keep the configuration
 	$(RM) $(MANDOCS7)
 	$(RM) $(PROGRAMS) $(TESTPROGS) $(MODULES) $(FIPSMODULE) $(SCRIPTS)
 	$(RM) $(GENERATED_MANDATORY) $(GENERATED)
-	-find . -name '*{- platform->depext() -}' \! -name '.*' \! -type d -exec $(RM) {} \;
-	-find . -name '*{- platform->objext() -}' \! -name '.*' \! -type d -exec $(RM) {} \;
 	$(RM) core
 	$(RM) tags TAGS doc-nits md-nits
 	$(RM) -r $(RESULT_D)
 	$(RM) providers/fips*.new
-	-find . -type l \! -name '.*' \! -path './pkcs11-provider/*' -exec $(RM) {} \;
+	# Remove the generated dependency files, object files, and symlinks
+	# in a single pass, avoid descending into submodules.
+	-find . \( -path './cloudflare-quiche' \
+	           -o -path './fuzz/corpora' \
+	           -o -path './gost-engine' \
+	           -o -path './krb5' \
+	           -o -path './oqs-provider' \
+	           -o -path './pkcs11-provider' \
+	           -o -path './pyca-cryptography' \
+	           -o -path './python-ecdsa' \
+	           -o -path './tlsfuzzer' \
+	           -o -path './tlslite-ng' \
+	           -o -path './wycheproof' \
+	           -prune \) \
+	        -o \! -type d \
+	           \( -name '*{- platform->depext() -}' \
+	              -o -name '*{- platform->objext() -}' \
+	              -o -type l \) \
+	           \! -name '.*' \
+	           -exec $(RM) '{}' +
 
-distclean: clean ## Clean and remove the configuration
+distclean: clean cov-clean ## Clean and remove the configuration
 	$(RM) include/openssl/configuration.h
 	$(RM) configdata.pm
 	$(RM) Makefile
@@ -1290,11 +1314,14 @@ providers/fips.module.sources.new: configdata.pm
 	  for x in crypto/bn/asm/*.pl crypto/bn/asm/*.S \
 		   crypto/aes/asm/*.pl crypto/aes/asm/*.S \
 		   crypto/ec/asm/*.pl \
+		   crypto/ml_dsa/asm/*.pl \
+		   crypto/ml_kem/asm/*.pl \
 		   crypto/modes/asm/*.pl \
 		   crypto/sha/asm/*.pl \
+		   crypto/slh_dsa/asm/*.pl \
 		   crypto/*cpuid.pl crypto/*cpuid.S \
 		   crypto/*cap.c; do \
-	    echo "$$x"; \
+	    test -e "$$x" && echo "$$x"; \
 	  done \
 	) | grep -v sm2p256 | sort | uniq > providers/fips.module.sources.new
 	rm -rf sources-tmp
@@ -1869,13 +1896,27 @@ $import: $full
 EOF
           }
       }
-      $recipe .= <<"EOF";
+      if (!run_on_windows()) {
+          $recipe .= <<"EOF";
 $full: $fulldeps
 	\$(CC) \$(LIB_CFLAGS) $linkflags\$(LIB_LDFLAGS)$shared_soname$shared_imp \\
 		-o $full$shared_def \\
 		$fullobjs \\
 		$linklibs \$(LIB_EX_LIBS)
 EOF
+      } else {
+          $recipe .= <<"EOF";
+$full: $fulldeps
+	\$(file >\$@.lst, \\
+		$fullobjs \\
+	)
+	\$(CC) \$(LIB_CFLAGS) $linkflags\$(LIB_LDFLAGS)$shared_soname$shared_imp \\
+		-o $full$shared_def \\
+		@\$@.lst \\
+		$linklibs \$(LIB_EX_LIBS)
+	rm -f \$@.lst
+EOF
+      }
       if (windowsdll()) {
           $recipe .= <<"EOF";
 	rm -f apps/$full

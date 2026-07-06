@@ -35,6 +35,12 @@
 
 #ifndef APPMACROS_ONLY
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wmissing-prototypes"
+#endif
+
 /*
  * Normally, do not define APPLINK_NO_INCLUDES.  Define it if you are using
  * symbol preprocessing and do not want the preprocessing to affect the
@@ -97,6 +103,14 @@ static int app_fsetmod(FILE *fp, char mod)
 extern "C" {
 #endif
 
+/*
+ * The AppLink table exposes the legacy CRT signatures used by ms/uplink.h.
+ */
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+
 __declspec(dllexport) void **
 #if defined(__BORLANDC__)
     /*
@@ -144,6 +158,14 @@ __declspec(dllexport) void **
 
     return OPENSSL_ApplinkTable;
 }
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 #ifdef __cplusplus
 }

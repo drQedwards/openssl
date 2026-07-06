@@ -160,6 +160,7 @@ custom_ext_parse_cb                     datatype
 pem_password_cb                         datatype
 ssl_ct_validation_cb                    datatype
 tls_session_secret_cb_fn                datatype
+tls_session_ticket_ext_cb_fn            datatype
 ASYNC_stack_alloc_fn                    datatype
 ASYNC_stack_free_fn                     datatype
 PKCS12_create_cb                        datatype
@@ -313,6 +314,7 @@ ERR_raise                               define
 ERR_raise_data                          define
 EVP_DigestSignUpdate                    define
 EVP_DigestVerifyUpdate                  define
+EVP_KDF_CTX_kdf                         define
 EVP_MD_CTX_get_block_size               define
 EVP_MD_CTX_get0_name                    define
 EVP_MD_CTX_get_size                     define
@@ -414,6 +416,7 @@ EVP_RSA_gen                             define
 EVP_seed_cfb                            define
 EVP_sm4_cfb                             define
 EXT_UTF8STRING                          define
+FIPS_mode                               define
 OBJ_cleanup                             define deprecated 1.1.0
 OCSP_parse_url                          define
 OCSP_REQ_CTX                            datatype deprecated 3.0.0
@@ -896,3 +899,5 @@ OPENSSL_load_u64_be                     inline
 OPENSSL_load_u64_le                     inline
 OPENSSL_store_u64_be                    inline
 OPENSSL_store_u64_le                    inline
+OSSL_BEGIN_ALLOW_DEPRECATED             define
+OSSL_END_ALLOW_DEPRECATED               define

@@ -17,7 +17,7 @@ use File::Compare qw/compare_text compare/;
 
 setup("test_pkeyutl");
 
-plan tests => 29;
+plan tests => 32;
 
 # For the tests below we use the cert itself as the TBS file
 
@@ -214,7 +214,7 @@ SKIP: {
 }
 
 SKIP: {
-    skip "EdDSA is not supported by this OpenSSL build", 6
+    skip "EdDSA is not supported by this OpenSSL build", 7
         if disabled("ecx");
 
     subtest "pkeyutl -rawin oneshot with file input (mmap or buffer path)" => sub {
@@ -273,7 +273,42 @@ SKIP: {
         unlink($stderr_file) if -f $stderr_file;
     };
 
-    subtest "Ed2559 CLI signature generation and verification" => sub {
+    subtest "pkeyutl -rawin oneshot with empty file (buffer path, filesize 0)" => sub {
+        my $ed25519_key = srctop_file("test", "tested25519.pem");
+        my $ed25519_pub = srctop_file("test", "tested25519pub.pem");
+        my $empty = "pkeyutl_empty.bin";
+        my $sigfile = "rawin_empty_ed25519.sig";
+        # Ed25519 is deterministic, so signing the empty message with
+        # tested25519.pem always yields this exact signature.
+        my $expected_sig =
+            "42a443bd375c962f571dbf7402654219655b30c395dee06e" .
+            "d2a4a41342686da620889e374807266a3aab535345985c96" .
+            "cbb7475c8b0df47968d29fbf3d352e0c";
+
+        plan tests => 3;
+
+        # create a zero-length input file
+        open(my $fh, '>', $empty) or die "cannot create $empty: $!";
+        close($fh);
+
+        ok(run(app(['openssl', 'pkeyutl', '-sign', '-rawin', '-inkey', $ed25519_key,
+                    '-in', $empty, '-out', $sigfile])),
+           "Ed25519 -rawin sign from empty file (filesize 0 buffer path)");
+        ok(run(app(['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', $ed25519_pub,
+                    '-sigfile', $sigfile, '-in', $empty])),
+           "Ed25519 -rawin verify from empty file");
+
+        # check the produced signature matches the known reference value
+        open(my $sfh, '<:raw', $sigfile) or die "cannot open $sigfile: $!";
+        read($sfh, my $sig, -s $sigfile);
+        close($sfh);
+        is(unpack("H*", $sig), $expected_sig,
+           "Ed25519 -rawin empty file signature matches the reference value");
+
+        unlink($empty);
+    };
+
+    subtest "Ed25519 CLI signature generation and verification" => sub {
         tsignverify("Ed25519",
                     srctop_file("test","tested25519.pem"),
                     srctop_file("test","tested25519pub.pem"),
@@ -287,7 +322,7 @@ SKIP: {
                     "-rawin");
     };
 
-    subtest "Ed2559 CLI signature generation and verification, no -rawin" => sub {
+    subtest "Ed25519 CLI signature generation and verification, no -rawin" => sub {
         tsignverify("Ed25519",
                     srctop_file("test","tested25519.pem"),
                     srctop_file("test","tested25519pub.pem"));
@@ -335,4 +370,87 @@ SKIP: {
 
     is(compare(srctop_file('test', 'encap_secret.bin'), "decap_out_etl.bin"), 0,
                "Secret is correctly decapsulated - pregenerated");
+}
+
+subtest "pkeyutl -pkeyopt_passin" => sub {
+    plan tests => 5;
+
+    my @common = ('openssl', 'pkeyutl', '-kdf', 'TLS1-PRF', '-kdflen', '16',
+                  '-pkeyopt', 'md:SHA256',
+                  '-pkeyopt', 'seed:someseed');
+
+    ok(run(app([@common, '-pkeyopt', 'secret:somesecret',
+                '-out', 'tls1prf_plain.bin'])),
+       "Derive with -pkeyopt secret");
+
+    ok(run(app([@common, '-pkeyopt_passin', 'secret:pass:somesecret',
+                '-out', 'tls1prf_passin.bin'])),
+       "Derive with -pkeyopt_passin secret");
+
+    is(compare('tls1prf_plain.bin', 'tls1prf_passin.bin'), 0,
+       "pkeyopt_passin secret matches plain pkeyopt secret");
+
+    # app_passwd failure: passphrase source cannot be read
+    with({ exit_checker => sub { return shift == 1; } },
+        sub {
+            ok(run(app([@common, '-pkeyopt_passin',
+                        'secret:file:no_such_passfile'])),
+               "Fail when the passphrase source cannot be read");
+        });
+
+    # EVP_PKEY_CTX_ctrl_str failure: unknown control name
+    with({ exit_checker => sub { return shift == 1; } },
+        sub {
+            ok(run(app([@common, '-pkeyopt_passin', 'bogus:pass:whatever'])),
+               "Fail on unknown pkey option via passin");
+        });
+};
+
+SKIP: {
+    skip "EC is not supported by this OpenSSL build", 1
+        if disabled("ec");
+
+    subtest "pkeyutl -derive peer key setup" => sub {
+        my $eckey = srctop_file("test", "testec-p256.pem");
+        my $ecpub = srctop_file("test", "testecpub-p256.pem");
+        my $rsapub = srctop_file("test", "testrsapub.pem");
+
+        plan tests => 5;
+
+        # ECDH derive against a matching peer public key
+        ok(run(app(['openssl', 'pkeyutl', '-derive',
+                    '-inkey', $eckey, '-peerkey', $ecpub,
+                    '-out', 'derive_secret.bin'])),
+           "Derive shared secret with matching peer key");
+
+        # setup_peer: peer key file cannot be loaded
+        with({ exit_checker => sub { return shift == 1; } },
+            sub {
+                ok(run(app(['openssl', 'pkeyutl', '-derive',
+                            '-inkey', $eckey, '-peerkey', 'no_such_peer.pem'])),
+                   "Fail when the peer key cannot be read");
+            });
+
+        # setup_peer: peer key type does not match the private key type
+        with({ exit_checker => sub { return shift == 1; } },
+            sub {
+                ok(run(app(['openssl', 'pkeyutl', '-derive',
+                            '-inkey', $eckey, '-peerkey', $rsapub])),
+                   "Fail when peer key type does not match private key");
+            });
+
+        # main: -derive requires -peerkey
+        with({ exit_checker => sub { return shift == 1; } },
+            sub {
+                ok(run(app(['openssl', 'pkeyutl', '-derive', '-inkey', $eckey])),
+                   "Fail when -derive is given without -peerkey");
+            });
+
+        # main: -peerkey is only valid with -derive
+        with({ exit_checker => sub { return shift == 1; } },
+            sub {
+                ok(run(app(['openssl', 'pkeyutl', '-inkey', $eckey, '-peerkey', $ecpub])),
+                   "Fail when -peerkey is given without -derive");
+            });
+    };
 }

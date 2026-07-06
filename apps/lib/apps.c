@@ -86,6 +86,22 @@ int app_init(long mesgwin)
 }
 #endif
 
+static int maybe_printf(BIO *bio, const char *format, ...)
+{
+    va_list args;
+    int ret = 0;
+
+    if (bio != NULL) {
+        va_start(args, format);
+
+        ret = BIO_vprintf(bio, format, args);
+
+        va_end(args);
+    }
+
+    return ret;
+}
+
 int ctx_set_verify_locations(SSL_CTX *ctx,
     const char *CAfile, int noCAfile,
     const char *CApath, int noCApath,
@@ -1057,9 +1073,12 @@ int load_key_certs_crls(const char *uri, int format, int maybe_stdin,
                 if (ok)
                     pcert = NULL;
             } else if (pcerts != NULL) {
-                ok = X509_add_cert(*pcerts,
-                    OSSL_STORE_INFO_get1_CERT(info),
-                    X509_ADD_FLAG_DEFAULT);
+                X509 *cert = OSSL_STORE_INFO_get1_CERT(info);
+
+                ok = cert != NULL
+                    && X509_add_cert(*pcerts, cert, X509_ADD_FLAG_DEFAULT);
+                if (!ok)
+                    X509_free(cert);
             }
             ncerts += ok;
             break;
@@ -1069,7 +1088,11 @@ int load_key_certs_crls(const char *uri, int format, int maybe_stdin,
                 if (ok)
                     pcrl = NULL;
             } else if (pcrls != NULL) {
-                ok = sk_X509_CRL_push(*pcrls, OSSL_STORE_INFO_get1_CRL(info));
+                X509_CRL *crl = OSSL_STORE_INFO_get1_CRL(info);
+
+                ok = crl != NULL && sk_X509_CRL_push(*pcrls, crl);
+                if (!ok)
+                    X509_CRL_free(crl);
             }
             ncrls += ok;
             break;
@@ -1860,8 +1883,14 @@ CA_DB *load_index(const char *dbfile, DB_ATTR *db_attr)
     }
 
     retdb->dbfname = OPENSSL_strdup(dbfile);
-    if (retdb->dbfname == NULL)
+    if (retdb->dbfname == NULL) {
+        TXT_DB_free(retdb->db);
+        retdb->db = NULL;
+        OPENSSL_free(retdb);
+        retdb = NULL;
+        ERR_raise_data(ERR_LIB_SYS, errno, "Out of memory while copying filename: %s", dbfile);
         goto err;
+    }
 
 #ifndef OPENSSL_NO_POSIX_IO
     retdb->dbst = dbst;
@@ -2324,11 +2353,15 @@ int encode_private_key(BIO *out, const char *output_type, const EVP_PKEY *pkey,
     if (ectx == NULL)
         return 0;
 
-    if (cipher != NULL)
-        if (!OSSL_ENCODER_CTX_set_cipher(ectx, EVP_CIPHER_get0_name(cipher), NULL)
-            || !OSSL_ENCODER_CTX_set_passphrase(ectx, (const unsigned char *)pass,
-                strlen(pass)))
+    if (cipher != NULL) {
+        if (!OSSL_ENCODER_CTX_set_cipher(ectx, EVP_CIPHER_get0_name(cipher), NULL))
             goto end;
+        OSSL_ENCODER_CTX_set_passphrase_ui(ectx, get_ui_method(), NULL);
+        if (pass != NULL
+            && !OSSL_ENCODER_CTX_set_passphrase(ectx,
+                (const unsigned char *)pass, strlen(pass)))
+            goto end;
+    }
 
     if (encopt != NULL) {
         int i, n = sk_OPENSSL_STRING_num(encopt);
@@ -2436,42 +2469,132 @@ unsigned char *next_protos_parse(size_t *outlen, const char *in)
     return out;
 }
 
-int check_cert_attributes(BIO *bio, X509 *x, const char *checkhost,
-    const char *checkemail, const char *checkip,
-    int print)
+int check_cert_might_be_valid(BIO *bio, BIO *b_err, X509 *x, const char *checkhost,
+    const char *checkemail, const char *checkip)
 {
-    int valid_host = 0;
-    int valid_mail = 0;
-    int valid_ip = 0;
-    int ret = 1;
+    int ret = 0;
+    int error;
+    X509_STORE_CTX *ctx = NULL;
+    X509_STORE *store = NULL;
+    X509_VERIFY_PARAM *vpm = NULL;
 
-    if (x == NULL)
-        return 0;
-
-    if (checkhost != NULL) {
-        valid_host = X509_check_host(x, checkhost, 0, 0, NULL);
-        if (print)
-            BIO_printf(bio, "Hostname %s does%s match certificate\n",
-                checkhost, valid_host == 1 ? "" : " NOT");
-        ret = ret && valid_host > 0;
+    if (x == NULL) {
+        maybe_printf(b_err, "Internal error, NULL certificate\n");
+        goto err;
     }
 
-    if (checkemail != NULL) {
-        valid_mail = X509_check_email(x, checkemail, 0, 0);
-        if (print)
-            BIO_printf(bio, "Email %s does%s match certificate\n",
-                checkemail, valid_mail ? "" : " NOT");
-        ret = ret && valid_mail > 0;
+    if ((store = X509_STORE_new()) == NULL) {
+        maybe_printf(b_err, "Malloc failed or internal error\n");
+        goto err;
     }
 
-    if (checkip != NULL) {
-        valid_ip = X509_check_ip_asc(x, checkip, 0);
-        if (print)
-            BIO_printf(bio, "IP %s does%s match certificate\n",
-                checkip, valid_ip ? "" : " NOT");
-        ret = ret && valid_ip > 0;
+    if (!X509_STORE_add_cert(store, x)) {
+        maybe_printf(b_err, "Malloc failed or internal error\n");
+        goto err;
     }
 
+    if ((vpm = X509_STORE_get0_param(store)) == NULL) {
+        maybe_printf(b_err, "Malloc failed or internal error\n");
+        goto err;
+    }
+
+    if ((ctx = X509_STORE_CTX_new()) == NULL) {
+        maybe_printf(b_err, "Malloc failed or internal error\n");
+        goto err;
+    }
+
+    /*
+     * As this is "might verify":
+     *
+     * We don't care about the verification time.
+     * We are trusting ourselves.
+     * We are very liberal in what we allow.
+     *
+     * Needless to say these flags should normally not be used in a
+     * for real verification.
+     */
+    X509_VERIFY_PARAM_set_flags(vpm, X509_V_FLAG_NO_CHECK_TIME);
+    X509_VERIFY_PARAM_set_flags(vpm, X509_V_FLAG_PARTIAL_CHAIN);
+    X509_VERIFY_PARAM_set_flags(vpm, X509_V_FLAG_IGNORE_CRITICAL);
+    X509_VERIFY_PARAM_set_flags(vpm, X509_V_FLAG_ALLOW_PROXY_CERTS);
+    X509_VERIFY_PARAM_set_trust(vpm, X509_TRUST_OK_ANY_EKU);
+
+    if (!X509_VERIFY_PARAM_set1_ip_asc(vpm, checkip)) {
+        maybe_printf(b_err, "Invalid IP address: %s\n", checkip);
+        goto err;
+    }
+
+    if (!X509_VERIFY_PARAM_set1_host(vpm, checkhost, 0)) {
+        maybe_printf(b_err, "Invalid host name: %s\n", checkhost);
+        goto err;
+    }
+
+    if (!X509_VERIFY_PARAM_set1_email(vpm, checkemail, 0)) {
+        maybe_printf(b_err, "Invalid email address: %s\n", checkemail);
+        goto err;
+    }
+
+    if (!X509_VERIFY_PARAM_set1_ip_asc(vpm, checkip)) {
+        maybe_printf(b_err, "Invalid IP address: %s\n", checkip);
+        goto err;
+    }
+
+    if (!X509_STORE_CTX_init(ctx, store, x, NULL)) {
+        maybe_printf(b_err, "Malloc failed or internal error\n");
+        goto err;
+    }
+
+    /* We might be verifying for ANY purpose ... */
+    if (!X509_STORE_CTX_set_purpose(ctx, X509_PURPOSE_ANY)) {
+        maybe_printf(b_err, "Malloc failed or internal error\n");
+        goto err;
+    }
+
+    ret = X509_verify_cert(ctx);
+    error = X509_STORE_CTX_get_error(ctx);
+    if (!ret) {
+
+        maybe_printf(bio, "Certificate may not verify: error %s\n",
+            X509_verify_cert_error_string(error));
+
+        if (checkhost != NULL && error == X509_V_ERR_HOSTNAME_MISMATCH)
+            maybe_printf(bio, "Hostname %s does NOT match certificate\n",
+                checkhost);
+        else if (checkemail != NULL && error == X509_V_ERR_EMAIL_MISMATCH)
+            maybe_printf(bio, "Email %s does NOT match certificate\n",
+                checkemail);
+        else if (checkip != NULL && error == X509_V_ERR_IP_ADDRESS_MISMATCH)
+            maybe_printf(bio, "IP %s does NOT match certificate\n",
+                checkip);
+        else {
+            /* Originally, we only cared about the above failures */
+            /*
+             * Suppress trust rejection errors, we don't care, because
+             * we don't really know what this might be used for if
+             * this was for real.
+             */
+            if (error == X509_V_ERR_CERT_REJECTED) {
+                maybe_printf(bio, "Ignoring certificate rejection error\n");
+                ret = 1;
+            }
+        }
+    } else {
+        if (checkhost != NULL)
+            maybe_printf(bio, "Hostname %s does match certificate\n",
+                checkhost);
+        if (checkemail != NULL)
+            maybe_printf(bio, "Email %s does match certificate\n",
+                checkemail);
+        if (checkip != NULL)
+            maybe_printf(bio, "IP %s does match certificate\n",
+                checkip);
+    }
+    X509_STORE_CTX_cleanup(ctx);
+
+err:
+    ERR_print_errors(b_err);
+    X509_STORE_free(store);
+    X509_STORE_CTX_free(ctx);
     return ret;
 }
 
@@ -2751,6 +2874,34 @@ void store_setup_crl_download(X509_STORE *st)
     X509_STORE_set_lookup_crls_cb(st, crls_http_cb);
 }
 
+int host_is_ip_address(const char *host)
+{
+#ifndef INET6_ADDRSTRLEN /* not defined on OPENSSL_NO_SOCK */
+#define INET6_ADDRSTRLEN 46
+#endif
+    char stripped_host_ipv6[INET6_ADDRSTRLEN + 1];
+    ASN1_OCTET_STRING *str;
+    int ret;
+
+    if (host == NULL)
+        return 0;
+
+    if (host[0] == '[') { /* OSSL_parse_url() returns IPv6 addresses enclosed in [ and ] */
+        size_t len = strlen(++host);
+        if (len == 0 || len > sizeof(stripped_host_ipv6) || host[--len] != ']')
+            return 0;
+        strncpy(stripped_host_ipv6, host, sizeof(stripped_host_ipv6));
+        stripped_host_ipv6[len] = '\0';
+        host = stripped_host_ipv6;
+    }
+    ERR_set_mark();
+    str = a2i_IPADDRESS(host);
+    ret = str != NULL;
+    ERR_pop_to_mark();
+    ASN1_OCTET_STRING_free(str);
+    return ret;
+}
+
 #if !defined(OPENSSL_NO_SOCK) && !defined(OPENSSL_NO_HTTP)
 static const char *tls_error_hint(void)
 {
@@ -2800,15 +2951,12 @@ BIO *app_http_tls_cb(BIO *bio, void *arg, int connect, int detail)
 {
     APP_HTTP_TLS_INFO *info = (APP_HTTP_TLS_INFO *)arg;
     SSL_CTX *ssl_ctx = info->ssl_ctx;
+    BIO *sbio = NULL;
 
     if (ssl_ctx == NULL) /* not using TLS */
         return bio;
     if (connect) {
         SSL *ssl;
-        BIO *sbio = NULL;
-        X509_STORE *ts = SSL_CTX_get_cert_store(ssl_ctx);
-        X509_VERIFY_PARAM *vpm = X509_STORE_get0_param(ts);
-        char *host = vpm == NULL ? NULL : X509_VERIFY_PARAM_get0_host(vpm, 0 /* first hostname */);
 
         /* adapt after fixing callback design flaw, see #17088 */
         if ((info->use_proxy
@@ -2818,27 +2966,35 @@ BIO *app_http_tls_cb(BIO *bio, void *arg, int connect, int detail)
             || (sbio = BIO_new(BIO_f_ssl())) == NULL) {
             return NULL;
         }
-        if ((ssl = SSL_new(ssl_ctx)) == NULL) {
-            BIO_free(sbio);
-            return NULL;
-        }
-
-        if (vpm != NULL)
-            SSL_set_tlsext_host_name(ssl, host /* may be NULL */);
+        if ((ssl = SSL_new(ssl_ctx)) == NULL)
+            goto err;
 
         SSL_set_connect_state(ssl);
-        BIO_set_ssl(sbio, ssl, BIO_CLOSE);
+        if (BIO_set_ssl(sbio, ssl, BIO_CLOSE) <= 0) {
+            SSL_free(ssl);
+            goto err;
+        }
+        if (!host_is_ip_address(info->server)) {
+            if (!SSL_set_tlsext_host_name(ssl, info->server)) /* set SNI */
+                goto err;
+        }
 
         bio = BIO_push(sbio, bio);
     } else { /* disconnect from TLS */
         bio = http_tls_shutdown(bio);
     }
     return bio;
+
+err:
+    BIO_free(sbio);
+    return NULL;
 }
 
 void APP_HTTP_TLS_INFO_free(APP_HTTP_TLS_INFO *info)
 {
     if (info != NULL) {
+        OPENSSL_free((char *)info->server);
+        OPENSSL_free((char *)info->port);
         SSL_CTX_free(info->ssl_ctx);
         OPENSSL_free(info);
     }
@@ -2961,14 +3117,10 @@ static int WIN32_rename(const char *from, const char *to)
         if (tfrom == NULL)
             goto err;
         tto = tfrom + flen;
-#if !defined(_WIN32_WCE) || _WIN32_WCE >= 101
         if (!MultiByteToWideChar(CP_ACP, 0, from, (int)flen, (WCHAR *)tfrom, (int)flen))
-#endif
             for (i = 0; i < flen; i++)
                 tfrom[i] = (TCHAR)from[i];
-#if !defined(_WIN32_WCE) || _WIN32_WCE >= 101
         if (!MultiByteToWideChar(CP_ACP, 0, to, (int)tlen, (WCHAR *)tto, (int)tlen))
-#endif
             for (i = 0; i < tlen; i++)
                 tto[i] = (TCHAR)to[i];
     }

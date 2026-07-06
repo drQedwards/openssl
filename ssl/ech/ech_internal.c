@@ -39,9 +39,9 @@ void ossl_ech_pbuf(const char *msg, const unsigned char *buf, const size_t blen)
             BIO_printf(trc_out, "msg is NULL\n");
         } else if (buf == NULL || blen == 0) {
             BIO_printf(trc_out, "%s: buf is %p\n", msg, (void *)buf);
-            BIO_printf(trc_out, "%s: blen is %lu\n", msg, (unsigned long)blen);
+            BIO_printf(trc_out, "%s: blen is %zu\n", msg, blen);
         } else {
-            BIO_printf(trc_out, "%s (%lu)\n", msg, (unsigned long)blen);
+            BIO_printf(trc_out, "%s (%zu)\n", msg, blen);
             BIO_dump_indent(trc_out, buf, (int)blen, 4);
         }
     }
@@ -937,6 +937,7 @@ static int ech_hkdf_extract_wrap(SSL_CONNECTION *s, EVP_MD *md, int for_hrr,
     EVP_PKEY_CTX *pctx = NULL;
     const char *label = NULL;
     unsigned char *p = NULL;
+    SSL_CTX *sctx = SSL_CONNECTION_GET_CTX(s);
 
     if (for_hrr == 1) {
         label = OSSL_ECH_HRR_CONFIRM_STRING;
@@ -950,7 +951,7 @@ static int ech_hkdf_extract_wrap(SSL_CONNECTION *s, EVP_MD *md, int for_hrr,
 #endif
     memset(zeros, 0, EVP_MAX_MD_SIZE);
     /* We don't seem to have an hkdf-extract that's exposed by libcrypto */
-    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    pctx = EVP_PKEY_CTX_new_from_name(sctx->libctx, "HKDF", sctx->propq);
     if (pctx == NULL
         || EVP_PKEY_derive_init(pctx) != 1
         || EVP_PKEY_CTX_hkdf_mode(pctx,

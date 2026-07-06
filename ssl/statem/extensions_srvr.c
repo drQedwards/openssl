@@ -21,6 +21,7 @@
 
 #define MAX_SUPPORTED_GROUPS 128
 #define MAX_KEY_SHARES 16
+#define MAX_PRE_SHARED_KEYS 16
 
 /*
  * 2 bytes for packet length, 2 bytes for format version, 2 bytes for
@@ -345,6 +346,15 @@ int tls_parse_ctos_status_request(SSL_CONNECTION *s, PACKET *pkt,
 
     /* Not defined if we get one of these in a client Certificate */
     if (x != NULL)
+        return 1;
+
+    /*
+     * We only care about this extension if the application
+     * registered a callback. Otherwise, there is nothing to
+     * tell us that a response is needed.
+     */
+    SSL_CTX *sctx = SSL_CONNECTION_GET_CTX(s);
+    if (sctx == NULL || sctx->ext.status_cb == NULL)
         return 1;
 
     if (!PACKET_get_1(pkt, (unsigned int *)&s->ext.status_type)) {
@@ -1330,9 +1340,14 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
         SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
         return 0;
     }
+    /* There must always be at least one identity in the list */
+    if (PACKET_remaining(&identities) == 0) {
+        SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        goto err;
+    }
 
     s->ext.ticket_expected = 0;
-    for (id = 0; PACKET_remaining(&identities) != 0; id++) {
+    for (id = 0; PACKET_remaining(&identities) != 0 && id < MAX_PRE_SHARED_KEYS; id++) {
         PACKET identity;
         unsigned long ticket_agel;
         size_t idlen;
@@ -1344,6 +1359,10 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
         }
 
         idlen = PACKET_remaining(&identity);
+        if (idlen == 0) {
+            SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+            return 0;
+        }
         if (s->psk_find_session_cb != NULL
             && !s->psk_find_session_cb(ussl, PACKET_data(&identity), idlen,
                 &sess)) {
@@ -1442,13 +1461,13 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
 
             if (ret == SSL_TICKET_EMPTY) {
                 SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
-                return 0;
+                goto err;
             }
 
             if (ret == SSL_TICKET_FATAL_ERR_MALLOC
                 || ret == SSL_TICKET_FATAL_ERR_OTHER) {
                 SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
-                return 0;
+                goto err;
             }
             if (ret == SSL_TICKET_NONE || ret == SSL_TICKET_NO_DECRYPT)
                 continue;
@@ -1503,14 +1522,35 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
             SSL_SESSION_free(sess);
             sess = NULL;
             s->ext.early_data_ok = 0;
-            s->ext.ticket_expected = 0;
+            /*
+             * We fall back to a full handshake. The new session ticket will be
+             * issued to the client with the newly negotiated ciphersuite,
+             * allowing successful resumption on future connections.
+             */
+            s->ext.ticket_expected = 1;
             continue;
         }
         break;
     }
 
-    if (sess == NULL)
-        return 1;
+    if (sess == NULL) {
+        size_t j;
+
+        for (j = 0; j < s->ssl_pkey_num && !ssl_has_cert(s, (int)j); j++)
+            ;
+        if (j < s->ssl_pkey_num) {
+            /* A certificate exists. Fallback to a full handshake */
+            return 1;
+        }
+        /*
+         * decrypt_error here to keep the alert the same as if the binder
+         * failed. See RFC8446 Appendix E.6. Note we make no attempt to do this
+         * in constant time compared to verifying the binder. None of this code
+         * is constant time anyway.
+         */
+        SSLfatal(s, SSL_AD_DECRYPT_ERROR, SSL_R_BAD_EXTENSION);
+        goto err;
+    }
 
     binderoffset = PACKET_data(pkt) - PACKET_msg_start(pkt);
     hashsize = EVP_MD_get_size(md);

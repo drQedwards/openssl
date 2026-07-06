@@ -691,6 +691,9 @@ static void quic_unref_port_bios(QUIC_PORT *port)
 {
     BIO *b;
 
+    if (port == NULL)
+        return;
+
     b = ossl_quic_port_get_net_rbio(port);
     BIO_free_all(b);
 
@@ -1871,6 +1874,7 @@ static int create_channel(QUIC_CONNECTION *qc, SSL_CTX *ctx)
     if (qc->port == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
         ossl_quic_engine_free(qc->engine);
+        qc->engine = NULL;
         return 0;
     }
 
@@ -1878,7 +1882,9 @@ static int create_channel(QUIC_CONNECTION *qc, SSL_CTX *ctx)
     if (qc->ch == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
         ossl_quic_port_free(qc->port);
+        qc->port = NULL;
         ossl_quic_engine_free(qc->engine);
+        qc->engine = NULL;
         return 0;
     }
 
@@ -3485,83 +3491,6 @@ int ossl_quic_set_default_stream_mode(SSL *s, uint32_t mode)
 }
 
 /*
- * SSL_detach_stream
- * -----------------
- */
-QUIC_TAKES_LOCK
-SSL *ossl_quic_detach_stream(SSL *s)
-{
-    QCTX ctx;
-    QUIC_XSO *xso = NULL;
-
-    if (!expect_quic_conn_only(s, &ctx))
-        return NULL;
-
-    qctx_lock(&ctx);
-
-    /* Calling this function inhibits default XSO autocreation. */
-    /* QC ref to any default XSO is transferred to us and to caller. */
-    qc_set_default_xso_keep_ref(ctx.qc, NULL, /*touch=*/1, &xso);
-
-    qctx_unlock(&ctx);
-
-    return xso != NULL ? &xso->obj.ssl : NULL;
-}
-
-/*
- * SSL_attach_stream
- * -----------------
- */
-QUIC_TAKES_LOCK
-int ossl_quic_attach_stream(SSL *conn, SSL *stream)
-{
-    QCTX ctx;
-    QUIC_XSO *xso;
-    int nref;
-
-    if (!expect_quic_conn_only(conn, &ctx))
-        return 0;
-
-    if (stream == NULL || stream->type != SSL_TYPE_QUIC_XSO)
-        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_NULL_PARAMETER,
-            "stream to attach must be a valid QUIC stream");
-
-    xso = (QUIC_XSO *)stream;
-
-    qctx_lock(&ctx);
-
-    if (ctx.qc->default_xso != NULL) {
-        qctx_unlock(&ctx);
-        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED,
-            "connection already has a default stream");
-    }
-
-    /*
-     * It is a caller error for the XSO being attached as a default XSO to have
-     * more than one ref.
-     */
-    if (!CRYPTO_GET_REF(&xso->obj.ssl.references, &nref)) {
-        qctx_unlock(&ctx);
-        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_INTERNAL_ERROR,
-            "ref");
-    }
-
-    if (nref != 1) {
-        qctx_unlock(&ctx);
-        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_INVALID_ARGUMENT,
-            "stream being attached must have "
-            "only 1 reference");
-    }
-
-    /* Caller's reference to the XSO is transferred to us. */
-    /* Calling this function inhibits default XSO autocreation. */
-    qc_set_default_xso(ctx.qc, xso, /*touch=*/1);
-
-    qctx_unlock(&ctx);
-    return 1;
-}
-
-/*
  * SSL_set_incoming_stream_policy
  * ------------------------------
  */
@@ -4473,14 +4402,14 @@ static void quic_classify_stream(QUIC_CONNECTION *qc,
     uint64_t *app_error_code)
 {
     int local_init;
-    uint64_t final_size;
+    uint64_t scratch_pad; /* throw away value */
 
     local_init = (ossl_quic_stream_is_server_init(qs) == qc->as_server);
 
     if (app_error_code != NULL)
         *app_error_code = UINT64_MAX;
     else
-        app_error_code = &final_size; /* throw away value */
+        app_error_code = &scratch_pad;
 
     if (!ossl_quic_stream_is_bidi(qs) && local_init != is_write) {
         /*
@@ -4513,7 +4442,7 @@ static void quic_classify_stream(QUIC_CONNECTION *qc,
         *app_error_code = !is_write
             ? qs->peer_reset_stream_aec
             : qs->peer_stop_sending_aec;
-    } else if (is_write && ossl_quic_sstream_get_final_size(qs->sstream, &final_size)) {
+    } else if (is_write && qs->have_final_size) {
         /*
          * Stream has been finished. Stream reset takes precedence over this for
          * the write case as peer may not have received all data.
@@ -4732,9 +4661,8 @@ int ossl_quic_get_key_update_type(const SSL *s)
  *
  * @return Pointer to the SSL object on success, or NULL on failure.
  */
-static SSL *alloc_port_user_ssl(QUIC_CHANNEL *ch, void *arg)
+static SSL *alloc_port_user_ssl(QUIC_CHANNEL *ch, QUIC_LISTENER *ql)
 {
-    QUIC_LISTENER *ql = arg;
     QUIC_CONNECTION *qc = create_qc_from_incoming_conn(ql, ch);
 
     return (qc == NULL) ? NULL : &qc->obj.ssl;
@@ -4757,7 +4685,7 @@ SSL *ossl_quic_new_listener(SSL_CTX *ctx, uint64_t flags)
 
     if ((ql = OPENSSL_zalloc(sizeof(*ql))) == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_CRYPTO_LIB, NULL);
-        goto err;
+        return NULL;
     }
 
 #if defined(OPENSSL_THREADS)
@@ -4784,7 +4712,7 @@ SSL *ossl_quic_new_listener(SSL_CTX *ctx, uint64_t flags)
     port_args.channel_ctx = ctx;
     port_args.is_multi_conn = 1;
     port_args.get_conn_user_ssl = alloc_port_user_ssl;
-    port_args.user_ssl_arg = ql;
+    port_args.ql = ql;
     if ((flags & SSL_LISTENER_FLAG_NO_VALIDATE) == 0)
         port_args.do_addr_validation = 1;
     ql->port = ossl_quic_engine_create_port(ql->engine, &port_args);
@@ -4805,8 +4733,8 @@ SSL *ossl_quic_new_listener(SSL_CTX *ctx, uint64_t flags)
     return &ql->obj.ssl;
 
 err:
-    if (ql != NULL)
-        ossl_quic_engine_free(ql->engine);
+    ossl_quic_port_free(ql->port);
+    ossl_quic_engine_free(ql->engine);
 
 #if defined(OPENSSL_THREADS)
     ossl_crypto_mutex_free(&ql->mutex);
@@ -4841,7 +4769,7 @@ SSL *ossl_quic_new_listener_from(SSL *ssl, uint64_t flags)
     port_args.channel_ctx = ssl->ctx;
     port_args.is_multi_conn = 1;
     port_args.get_conn_user_ssl = alloc_port_user_ssl;
-    port_args.user_ssl_arg = ql;
+    port_args.ql = ql;
     if ((flags & SSL_LISTENER_FLAG_NO_VALIDATE) == 0)
         port_args.do_addr_validation = 1;
     ql->port = ossl_quic_engine_create_port(ctx.qd->engine, &port_args);
@@ -4953,7 +4881,7 @@ SSL *ossl_quic_new_from_listener(SSL *ssl, uint64_t flags)
 #endif
 
     /* Create the handshake layer. */
-    qc->tls = ossl_ssl_connection_new_int(ql->obj.ssl.ctx, NULL, TLS_method());
+    qc->tls = ossl_ssl_connection_new_int(ql->obj.ssl.ctx, &qc->obj.ssl, TLS_method());
     if (qc->tls == NULL || (sc = SSL_CONNECTION_FROM_SSL(qc->tls)) == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
         goto err;
@@ -5263,7 +5191,6 @@ static QUIC_CONNECTION *create_qc_from_incoming_conn(QUIC_LISTENER *ql, QUIC_CHA
 #if defined(OPENSSL_THREADS)
     qc->mutex = ql->mutex;
 #endif
-    qc->tls = ossl_quic_channel_get0_tls(ch);
     qc->started = 1;
     qc->as_server = 1;
     qc->as_server_state = 1;
@@ -5272,6 +5199,27 @@ static QUIC_CONNECTION *create_qc_from_incoming_conn(QUIC_LISTENER *ql, QUIC_CHA
     qc->incoming_stream_policy = SSL_INCOMING_STREAM_POLICY_AUTO;
     qc->last_error = SSL_ERROR_NONE;
     qc_update_reject_policy(qc);
+
+    /*
+     * Detach the channel from the freshly-built qc before handing it back.
+     *
+     * qc->ch was set to @p ch above so the in-function initialisers
+     * (e.g. qc_update_reject_policy()) can reach the channel during setup.
+     * Once setup is done we clear it again because, at this point, the qc
+     * does NOT yet own the channel: @p ch is still owned by the caller of
+     * port_new_handshake_layer(), which only commits ownership (by setting
+     * qc->ch = ch on the success path) after the rest of channel
+     * construction has succeeded.
+     *
+     * Leaving qc->ch set here would mean any error path that does
+     * SSL_free(user_ssl) before the commit point cascades into
+     * qc_cleanup() -> ossl_quic_channel_free(qc->ch) and frees a channel
+     * the caller is still using -- the use-after-free / double-free class
+     * of bug we hit before. Resetting to NULL makes SSL_free(user_ssl)
+     * safe at any point until the caller explicitly hands ch over.
+     */
+    qc->ch = NULL;
+
     return qc;
 
 err:
@@ -5457,6 +5405,11 @@ int ossl_quic_set_peer_token(SSL_CTX *ctx, BIO_ADDR *peer,
         ossl_quic_free_peer_token(old);
     }
     lh_QUIC_TOKEN_insert(c->cache, tok);
+    if (lh_QUIC_TOKEN_error(c->cache)) {
+        ossl_quic_free_peer_token(tok);
+        ossl_crypto_mutex_unlock(c->mutex);
+        return 0;
+    }
 
     ossl_crypto_mutex_unlock(c->mutex);
     return 1;

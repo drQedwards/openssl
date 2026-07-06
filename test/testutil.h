@@ -20,6 +20,7 @@
 #include <openssl/bn.h>
 #include <openssl/x509.h>
 #include "opt.h"
+#include "mfail/mfail.h"
 
 /*-
  * Simple unit tests should implement setup_tests().
@@ -57,6 +58,33 @@
  */
 #define ADD_ALL_TESTS(test_function, num) \
     add_all_tests(#test_function, test_function, num, 1)
+
+/*
+ * Memory failure exhaustive test. Runs test_fn repeatedly, each time
+ * injecting an allocation failure one step later. When a failure is
+ * injected, asserts test_fn returns 0. When no failure is injected
+ * (all allocation points exhausted), asserts test_fn returns 1 and stops.
+ *
+ * The NO_CHECK variant disables the assertion that failed tests must
+ * result in function failure.
+ *
+ * test_fn has no parameters and returns 1 on success, 0 on failure.
+ */
+
+/* Per-test flags for add_mfail_test() */
+#define MFAIL_TEST_NO_CHECK (1 << 0)
+
+#define ADD_MFAIL_TEST(test_fn) \
+    add_mfail_test(#test_fn, test_fn, 0)
+#define ADD_MFAIL_NO_CHECK_TEST(test_fn) \
+    add_mfail_test(#test_fn, test_fn, MFAIL_TEST_NO_CHECK)
+
+/* Runs the exhaustive mfail cycle for each 0 <= idx < num */
+#define ADD_MFAIL_ALL_TESTS(test_fn, num) \
+    add_mfail_all_tests(#test_fn, test_fn, num, 0)
+#define ADD_MFAIL_ALL_NO_CHECK_TESTS(test_fn, num) \
+    add_mfail_all_tests(#test_fn, test_fn, num, MFAIL_TEST_NO_CHECK)
+
 /*
  * A variant of the same without TAP output.
  */
@@ -227,6 +255,13 @@ int test_arg_libctx(OSSL_LIB_CTX **libctx, OSSL_PROVIDER **default_null_prov,
 void add_test(const char *test_case_name, int (*test_fn)(void));
 void add_all_tests(const char *test_case_name, int (*test_fn)(int idx), int num,
     int subtest);
+void add_mfail_test(const char *test_case_name, int (*test_fn)(void),
+    int flags);
+void add_mfail_all_tests(const char *test_case_name, int (*test_fn)(int idx),
+    int num, int flags);
+
+#define MFAIL_start mfail_start
+#define MFAIL_end mfail_end
 
 /*
  * Declarations for user defined functions.
@@ -677,6 +712,10 @@ X509 *X509_from_strings(const char **pem);
  * Create a CRL from an array of strings.
  */
 X509_CRL *CRL_from_strings(const char **pem);
+/*
+ * Create a PKEY from an array of strings.
+ */
+EVP_PKEY *PKEY_from_strings(const char **pem);
 /*
  * Glue an array of strings together.  Return a BIO and put the string
  * into |*out| so we can free it.

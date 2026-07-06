@@ -18,9 +18,9 @@
 #if defined(_WIN32)
 /* Included before async.h to avoid some warnings */
 #include <windows.h>
+#endif
 #if !defined(OPENSSL_NO_ECH) && !defined(PATH_MAX)
 #define PATH_MAX 4096
-#endif
 #endif
 
 #include <openssl/e_os2.h>
@@ -187,8 +187,8 @@ static unsigned int psk_server_cb(SSL *ssl, const char *identity,
         goto out_err;
     }
     if (s_debug)
-        BIO_printf(bio_s_out, "identity_len=%d identity=%s\n",
-            (int)strlen(identity), identity);
+        BIO_printf(bio_s_out, "identity_len=%zu identity=%s\n",
+            strlen(identity), identity);
 
     /* here we could lookup the given identity e.g. from a database */
     if (strcmp(identity, psk_identity) != 0) {
@@ -209,7 +209,7 @@ static unsigned int psk_server_cb(SSL *ssl, const char *identity,
     }
     if (key_len > (int)max_psk_len) {
         BIO_printf(bio_err,
-            "psk buffer of callback is too small (%d) for key (%ld)\n",
+            "psk buffer of callback is too small (%u) for key (%ld)\n",
             max_psk_len, key_len);
         OPENSSL_free(key);
         return 0;
@@ -617,7 +617,8 @@ static int ssl_ech_servername_cb(SSL *s, int *ad, void *arg)
         return SSL_TLSEXT_ERR_NOACK;
     if (echrv == SSL_ECH_STATUS_SUCCESS && servername != NULL) {
         if (ctx2 != NULL) {
-            int check_host = X509_check_host(p->scert, servername, 0, 0, NULL);
+            int check_host = check_cert_might_be_valid(p->biodebug,
+                p->biodebug, p->scert, servername, NULL, NULL);
 
             if (check_host == 1) {
                 if (p->biodebug != NULL)
@@ -1339,9 +1340,9 @@ const OPTIONS s_server_options[] = {
 
     OPT_SECTION("Identity"),
     { "context", OPT_CONTEXT, 's', "Set session ID context" },
-    { "CAfile", OPT_CAFILE, '<', "PEM format file of CA's" },
-    { "CApath", OPT_CAPATH, '/', "PEM format directory of CA's" },
-    { "CAstore", OPT_CASTORE, ':', "URI to store of CA's" },
+    { "CAfile", OPT_CAFILE, '<', "File in PEM format with trusted CA certs" },
+    { "CApath", OPT_CAPATH, '/', "Dir with trusted CA cert files in PEM format" },
+    { "CAstore", OPT_CASTORE, ':', "URI of store with trusted CA certs" },
     { "no-CAfile", OPT_NOCAFILE, '-',
         "Do not load the default certificates file" },
     { "no-CApath", OPT_NOCAPATH, '-',
@@ -1349,9 +1350,9 @@ const OPTIONS s_server_options[] = {
     { "no-CAstore", OPT_NOCASTORE, '-',
         "Do not load certificates from the default certificates store URI" },
     { "nocert", OPT_NOCERT, '-', "Don't use any certificates (Anon-DH)" },
-    { "verify", OPT_VERIFY, 'n', "Turn on peer certificate verification" },
-    { "Verify", OPT_UPPER_V_VERIFY, 'n',
-        "Turn on peer certificate verification, must have a cert" },
+    { "verify", OPT_VERIFY, 'p', "Turn on peer certificate verification, set depth" },
+    { "Verify", OPT_UPPER_V_VERIFY, 'p',
+        "Turn on peer certificate verification, must have a cert, set depth" },
     { "nameopt", OPT_NAMEOPT, 's', "Certificate subject/issuer name printing options" },
     { "cert", OPT_CERT, '<', "Server certificate file to use; default " TEST_CERT },
     { "cert2", OPT_CERT2, '<',
@@ -1408,17 +1409,21 @@ const OPTIONS s_server_options[] = {
     { "crl_download", OPT_CRL_DOWNLOAD, '-',
         "Download CRLs from distribution points in certificate CDP entries" },
     { "chainCAfile", OPT_CHAINCAFILE, '<',
-        "CA file for certificate chain (PEM format)" },
+        "File in PEM format with trusted CA certs to build own cert chain" },
     { "chainCApath", OPT_CHAINCAPATH, '/',
-        "use dir as certificate store path to build CA certificate chain" },
+        "Dir with trusted CA cert files in PEM format to build own cert chain" },
     { "chainCAstore", OPT_CHAINCASTORE, ':',
-        "use URI as certificate store to build CA certificate chain" },
+        "URI of trusted CA cert store to build own cert chain" },
+    { OPT_MORE_STR, 0, 0,
+        "NOTE: these override -CApath, -CAfile, and -CAstore for server chain building" },
     { "verifyCAfile", OPT_VERIFYCAFILE, '<',
-        "CA file for certificate verification (PEM format)" },
+        "File in PEM format with trusted CA certs for client cert verification" },
     { "verifyCApath", OPT_VERIFYCAPATH, '/',
-        "use dir as certificate store path to verify CA certificate" },
+        "Dir with trusted CA cert files in PEM format for client cert verification" },
     { "verifyCAstore", OPT_VERIFYCASTORE, ':',
-        "use URI as certificate store to verify CA certificate" },
+        "URI of trusted CA cert store for client cert verification" },
+    { OPT_MORE_STR, 0, 0,
+        "NOTE: these override -CApath, -CAfile, and -CAstore for client cert verification" },
     { "expected-rpks", OPT_EXPECTED_RPK, '<',
         "PEM file with expected client public key(s)" },
     { "no_cache", OPT_NO_CACHE, '-', "Disable session cache" },
@@ -1442,7 +1447,7 @@ const OPTIONS s_server_options[] = {
         "Provide certificate status response(s) if requested, for the whole chain" },
     { "status_verbose", OPT_STATUS_VERBOSE, '-',
         "Print more output in certificate status callback" },
-    { "status_timeout", OPT_STATUS_TIMEOUT, 'n',
+    { "status_timeout", OPT_STATUS_TIMEOUT, 'N',
         "Status request responder timeout" },
     { "status_url", OPT_STATUS_URL, 's', "Status request fallback URL" },
     { "proxy", OPT_PROXY, 's',
@@ -1499,9 +1504,9 @@ const OPTIONS s_server_options[] = {
 #endif
 
     OPT_SECTION("Protocol and version"),
-    { "max_early_data", OPT_MAX_EARLY, 'n',
+    { "max_early_data", OPT_MAX_EARLY, 'N',
         "The maximum number of bytes of early data as advertised in tickets" },
-    { "recv_max_early_data", OPT_RECV_MAX_EARLY, 'n',
+    { "recv_max_early_data", OPT_RECV_MAX_EARLY, 'N',
         "The maximum number of bytes of early data (hard limit)" },
     { "early_data", OPT_EARLY_DATA, '-', "Attempt to read early data" },
     { "num_tickets", OPT_S_NUM_TICKETS, 'n',
@@ -1884,13 +1889,13 @@ int s_server_main(int argc, char *argv[])
             break;
         case OPT_VERIFY:
             s_server_verify = SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE;
-            verify_args.depth = atoi(opt_arg());
+            verify_args.depth = opt_int_arg();
             if (!s_quiet)
                 BIO_printf(bio_err, "verify depth is %d\n", verify_args.depth);
             break;
         case OPT_UPPER_V_VERIFY:
             s_server_verify = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT | SSL_VERIFY_CLIENT_ONCE;
-            verify_args.depth = atoi(opt_arg());
+            verify_args.depth = opt_int_arg();
             if (!s_quiet)
                 BIO_printf(bio_err,
                     "verify depth is %d, must return a certificate\n",
@@ -2074,7 +2079,7 @@ int s_server_main(int argc, char *argv[])
         case OPT_STATUS_TIMEOUT:
 #ifndef OPENSSL_NO_OCSP
             s_tlsextstatus = 1;
-            tlscstatp.timeout = atoi(opt_arg());
+            tlscstatp.timeout = opt_int_arg();
 #endif
             break;
         case OPT_PROXY:
@@ -2300,35 +2305,35 @@ int s_server_main(int argc, char *argv[])
             keymatexportlabel = opt_arg();
             break;
         case OPT_KEYMATEXPORTLEN:
-            keymatexportlen = atoi(opt_arg());
+            keymatexportlen = opt_int_arg();
             break;
         case OPT_ASYNC:
             async = 1;
             break;
         case OPT_MAX_SEND_FRAG:
-            max_send_fragment = atoi(opt_arg());
+            max_send_fragment = opt_int_arg();
             break;
         case OPT_SPLIT_SEND_FRAG:
-            split_send_fragment = atoi(opt_arg());
+            split_send_fragment = opt_int_arg();
             break;
         case OPT_MAX_PIPELINES:
-            max_pipelines = atoi(opt_arg());
+            max_pipelines = opt_int_arg();
             break;
         case OPT_READ_BUF:
-            read_buf_len = atoi(opt_arg());
+            read_buf_len = opt_int_arg();
             break;
         case OPT_KEYLOG_FILE:
             keylog_file = opt_arg();
             break;
         case OPT_MAX_EARLY:
-            max_early_data = atoi(opt_arg());
+            max_early_data = opt_int_arg();
             if (max_early_data < 0) {
                 BIO_puts(bio_err, "Invalid value for max_early_data\n");
                 goto end;
             }
             break;
         case OPT_RECV_MAX_EARLY:
-            recv_max_early_data = atoi(opt_arg());
+            recv_max_early_data = opt_int_arg();
             if (recv_max_early_data < 0) {
                 BIO_puts(bio_err, "Invalid value for recv_max_early_data\n");
                 goto end;
@@ -3130,6 +3135,9 @@ int s_server_main(int argc, char *argv[])
     ret = 0;
 end:
     SSL_CTX_free(ctx);
+#ifndef OPENSSL_NO_SRP
+    cleanup_srp(&srp_callback_parm);
+#endif
     SSL_SESSION_free(psksess);
     set_keylog_file(NULL, NULL);
     X509_free(s_cert);
@@ -4012,6 +4020,7 @@ static int www_body(int s, int stype, int prot, unsigned char *context)
 
     if (rpk_files != NULL && !rpk_enable(con)) {
         BIO_puts(bio_err, "Error enabling client RPK verification\n");
+        SSL_free(con);
         goto err;
     }
 
@@ -4535,6 +4544,7 @@ static int rev_body(int s, int stype, int prot, unsigned char *context)
     if (rpk_files != NULL && !rpk_enable(con)) {
         BIO_puts(bio_err, "Error enabling client RPK verification\n");
         ERR_print_errors(bio_err);
+        SSL_free(con);
         goto err;
     }
 

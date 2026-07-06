@@ -7,6 +7,9 @@
  * https://www.openssl.org/source/license.html
  */
 
+#if !defined(OSSL_LIBCRYPTO_ENCODE_DECODE_ENCODER_LOCAL_H)
+#define OSSL_LIBCRYPTO_ENCODE_DECODE_ENCODER_LOCAL_H
+
 #include <openssl/core_dispatch.h>
 #include <openssl/types.h>
 #include <openssl/safestack.h>
@@ -21,6 +24,7 @@
 struct ossl_endecode_base_st {
     OSSL_PROVIDER *prov;
     int id;
+    int no_store;
     char *name;
     const OSSL_ALGORITHM *algodef;
     OSSL_PROPERTY_LIST *parsed_propdef;
@@ -177,3 +181,5 @@ ossl_encoder_parsed_properties(const OSSL_ENCODER *encoder);
 
 int ossl_decoder_fast_is_a(OSSL_DECODER *decoder,
     const char *name, int *id_cache);
+
+#endif /* !defined(OSSL_LIBCRYPTO_ENCODE_DECODE_ENCODER_LOCAL_H) */

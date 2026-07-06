@@ -1489,7 +1489,14 @@ __owur CON_FUNC_RETURN tls_construct_client_hello(SSL_CONNECTION *s, WPACKET *pk
 #ifndef OPENSSL_NO_ECH
     /* same session ID is used for inner/outer when doing ECH */
     if (s->ext.ech.es != NULL) {
-        sess_id_len = sizeof(s->tmp_session_id);
+        if (s->version != TLS1_3_VERSION) {
+            SSLfatal(s, SSL_AD_PROTOCOL_VERSION, SSL_R_UNSUPPORTED_SSL_VERSION);
+            return CON_FUNC_ERROR;
+        }
+        if ((s->options & SSL_OP_ENABLE_MIDDLEBOX_COMPAT) != 0)
+            sess_id_len = sizeof(s->tmp_session_id);
+        else
+            sess_id_len = 0;
     } else {
 #endif
         if (s->new_session || s->session->ssl_version == TLS1_3_VERSION) {
@@ -1632,7 +1639,7 @@ static int set_client_ciphersuite(SSL_CONNECTION *s,
      * If it is a disabled cipher we either didn't send it in client hello,
      * or it's not allowed for the selected protocol. So we return an error.
      */
-    if (ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_CHECK, 1)) {
+    if (ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_CHECK)) {
         SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER, SSL_R_WRONG_CIPHER_RETURNED);
         return 0;
     }
@@ -2959,8 +2966,10 @@ MSG_PROCESS_RETURN tls_process_certificate_request(SSL_CONNECTION *s,
         s->s3.tmp.valid_flags = OPENSSL_calloc(s->ssl_pkey_num, sizeof(uint32_t));
 
     /* Give up for good if allocation didn't work */
-    if (s->s3.tmp.valid_flags == NULL)
-        return 0;
+    if (s->s3.tmp.valid_flags == NULL) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_CRYPTO_LIB);
+        return MSG_PROCESS_ERROR;
+    }
 
     if (SSL_CONNECTION_IS_TLS13(s)) {
         PACKET reqctx, extensions;
@@ -3081,7 +3090,6 @@ MSG_PROCESS_RETURN tls_process_new_session_ticket(SSL_CONNECTION *s,
     unsigned int sess_len;
     RAW_EXTENSION *exts = NULL;
     PACKET nonce;
-    EVP_MD *sha256 = NULL;
     SSL_CTX *sctx = SSL_CONNECTION_GET_CTX(s);
 
     PACKET_null_init(&nonce);
@@ -3164,6 +3172,14 @@ MSG_PROCESS_RETURN tls_process_new_session_ticket(SSL_CONNECTION *s,
     if (SSL_CONNECTION_IS_TLS13(s)) {
         PACKET extpkt;
 
+        /*
+         * Fulfilling RFC8446:4.6.1 requirement: Clients MUST NOT cache
+         * tickets for longer than 7 days.
+         */
+        if (ticket_lifetime_hint > 604800) {
+            ticket_lifetime_hint = 604800;
+        }
+
         if (!PACKET_as_length_prefixed_2(pkt, &extpkt)
             || PACKET_remaining(pkt) != 0) {
             SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_LENGTH_MISMATCH);
@@ -3191,25 +3207,16 @@ MSG_PROCESS_RETURN tls_process_new_session_ticket(SSL_CONNECTION *s,
      * We choose the former approach because this fits in with assumptions
      * elsewhere in OpenSSL. The session ID is set to the SHA256 hash of the
      * ticket.
-     */
-    sha256 = EVP_MD_fetch(sctx->libctx, "SHA2-256", sctx->propq);
-    if (sha256 == NULL) {
-        /* Error is already recorded */
-        SSLfatal_alert(s, SSL_AD_INTERNAL_ERROR);
-        goto err;
-    }
-    /*
+     *
      * We use sess_len here because EVP_Digest expects an int
      * but s->session->session_id_length is a size_t
      */
     if (!EVP_Digest(s->session->ext.tick, ticklen,
             s->session->session_id, &sess_len,
-            sha256, NULL)) {
+            sctx->sha256, NULL)) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_EVP_LIB);
         goto err;
     }
-    EVP_MD_free(sha256);
-    sha256 = NULL;
     s->session->session_id_length = sess_len;
     s->session->not_resumable = 0;
 
@@ -3248,7 +3255,6 @@ MSG_PROCESS_RETURN tls_process_new_session_ticket(SSL_CONNECTION *s,
 
     return MSG_PROCESS_CONTINUE_READING;
 err:
-    EVP_MD_free(sha256);
     OPENSSL_free(exts);
     return MSG_PROCESS_ERROR;
 }
@@ -3705,6 +3711,7 @@ static int tls_construct_cke_gost(SSL_CONNECTION *s, WPACKET *pkt)
     unsigned int md_len;
     unsigned char shared_ukm[32], tmp[256];
     EVP_MD_CTX *ukm_hash = NULL;
+    EVP_MD *ukm_md = NULL;
     int dgst_nid = NID_id_GostR3411_94;
     unsigned char *pms = NULL;
     size_t pmslen = 0;
@@ -3755,8 +3762,10 @@ static int tls_construct_cke_gost(SSL_CONNECTION *s, WPACKET *pkt)
      * data
      */
     ukm_hash = EVP_MD_CTX_new();
+    ukm_md = EVP_MD_fetch(sctx->libctx, OBJ_nid2sn(dgst_nid), sctx->propq);
     if (ukm_hash == NULL
-        || EVP_DigestInit(ukm_hash, EVP_get_digestbynid(dgst_nid)) <= 0
+        || ukm_md == NULL
+        || EVP_DigestInit_ex(ukm_hash, ukm_md, NULL) <= 0
         || EVP_DigestUpdate(ukm_hash, s->s3.client_random,
                SSL3_RANDOM_SIZE)
             <= 0
@@ -3764,9 +3773,12 @@ static int tls_construct_cke_gost(SSL_CONNECTION *s, WPACKET *pkt)
                SSL3_RANDOM_SIZE)
             <= 0
         || EVP_DigestFinal_ex(ukm_hash, shared_ukm, &md_len) <= 0) {
+        EVP_MD_free(ukm_md);
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
         goto err;
     }
+    EVP_MD_free(ukm_md);
+    ukm_md = NULL;
     EVP_MD_CTX_free(ukm_hash);
     ukm_hash = NULL;
     if (EVP_PKEY_CTX_ctrl(pkey_ctx, -1, EVP_PKEY_OP_ENCRYPT,

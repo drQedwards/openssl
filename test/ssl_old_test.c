@@ -1284,7 +1284,7 @@ int main(int argc, char *argv[])
         no_protocol = 0;
 
     /*
-     * Testing was requested for a compiled-out protocol (e.g. SSLv3).
+     * Testing was requested for a compiled-out protocol (e.g. TLSv1, etc.).
      * Ideally, we would error out, but the generic test wrapper can't know
      * when to expect failure. So we do nothing and return success.
      */
@@ -2478,7 +2478,7 @@ int doit_biopair(SSL *s_ssl, SSL *c_ssl, long count,
                     progress = 1;
 
                     if (debug)
-                        printf((io1 == client_io) ? "C->S relaying: %d bytes\n" : "S->C relaying: %d bytes\n", (int)num);
+                        printf((io1 == client_io) ? "C->S relaying: %zu bytes\n" : "S->C relaying: %zu bytes\n", num);
                 }
             } while (r1 && r2);
 
@@ -2525,7 +2525,7 @@ int doit_biopair(SSL *s_ssl, SSL *c_ssl, long count,
                     }
 
                     if (debug)
-                        printf((io2 == client_io) ? "C->S relaying: %d bytes\n" : "S->C relaying: %d bytes\n", (int)num);
+                        printf((io2 == client_io) ? "C->S relaying: %zu bytes\n" : "S->C relaying: %zu bytes\n", num);
                 }
             } /* no loop, BIO_ctrl_get_read_request now
                * returns 0 anyway */

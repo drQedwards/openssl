@@ -618,7 +618,7 @@ static void ssl_cipher_collect_ciphers(const SSL_METHOD *ssl_method,
 
     /*
      * We have num_of_ciphers descriptions compiled in, depending on the
-     * method selected (SSLv3, TLSv1 etc).
+     * method selected (TLSv1, etc.).
      * These will later be sorted in a linked list with at most num
      * entries.
      */
@@ -1233,6 +1233,10 @@ static int ciphersuite_cb(const char *elem, int len, void *arg)
     const SSL_CIPHER *cipher;
     /* Arbitrary sized temp buffer for the cipher name. Should be big enough */
     char name[80];
+
+    /* CONF_parse_list signals empty elements with elem == NULL; skip them */
+    if (elem == NULL || len == 0)
+        return 1;
 
     if (len > (int)(sizeof(name) - 1))
         /* Anyway return 1 so we can parse rest of the list */
@@ -2277,7 +2281,7 @@ int ssl_cipher_list_to_bytes(SSL_CONNECTION *s, STACK_OF(SSL_CIPHER) *sk,
 
         c = sk_SSL_CIPHER_value(sk, i);
         /* Skip disabled ciphers */
-        if (ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_SUPPORTED, 0))
+        if (ssl_cipher_disabled(s, c, SSL_SECOP_CIPHER_SUPPORTED))
             continue;
 
         if (!ssl->method->put_cipher_by_char(c, pkt, &len)) {

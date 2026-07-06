@@ -203,7 +203,7 @@ my $_word = ($flavour =~ /win/ ? "DCDU" : ".word");
 
 $code=<<___;
 #ifndef __KERNEL__
-# include "arm_arch.h"
+# include "arch/arm_arch.h"
 # define VFP_ABI_PUSH	vstmdb	sp!,{d8-d15}
 # define VFP_ABI_POP	vldmia	sp!,{d8-d15}
 #else
@@ -291,6 +291,7 @@ WORD64(0x5fcb6fab,0x3ad6faec, 0x6c44198c,0x4a475817)
 
 .global	sha512_block_data_order
 .type	sha512_block_data_order,%function
+.align 5
 sha512_block_data_order:
 .Lsha512_block_data_order:
 #if __ARM_ARCH__<7 && !defined(__thumb2__)

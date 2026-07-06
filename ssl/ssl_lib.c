@@ -20,6 +20,7 @@
 #include <openssl/ocsp.h>
 #include <openssl/dh.h>
 #include <openssl/async.h>
+#include <openssl/kdf.h>
 #include <openssl/ct.h>
 #include <openssl/trace.h>
 #include <openssl/core_names.h>
@@ -508,10 +509,6 @@ static int ssl_check_allowed_versions(int min_version, int max_version)
 #ifdef OPENSSL_NO_TLS1_1
         if (max_version == TLS1_1_VERSION)
             max_version = TLS1_VERSION;
-#endif
-#ifdef OPENSSL_NO_TLS1
-        if (max_version == TLS1_VERSION)
-            max_version = SSL3_VERSION;
 #endif
 #ifdef OPENSSL_NO_TLS1
         if (min_version == TLS1_VERSION)
@@ -2271,14 +2268,13 @@ static void ssl_update_error_state(SSL_CONNECTION *sc)
     if (sc == NULL)
         return;
 
-    if (sc->statem.state == MSG_FLOW_ERROR) {
+    if (sc->statem.state == MSG_FLOW_ERROR
+        && sc->statem.error_state == ERROR_STATE_NOERROR) {
         l = ERR_peek_error();
-        if (l != 0) {
-            if (ERR_GET_LIB(l) == ERR_LIB_SYS)
-                sc->statem.error_state = ERROR_STATE_SYSCALL;
-            else
-                sc->statem.error_state = ERROR_STATE_SSL;
-        }
+        if (l == 0 || ERR_GET_LIB(l) == ERR_LIB_SYS)
+            sc->statem.error_state = ERROR_STATE_SYSCALL;
+        else
+            sc->statem.error_state = ERROR_STATE_SSL;
     }
 }
 
@@ -3469,7 +3465,7 @@ STACK_OF(SSL_CIPHER) *SSL_get1_supported_ciphers(SSL *s)
         return NULL;
     for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
         const SSL_CIPHER *c = sk_SSL_CIPHER_value(ciphers, i);
-        if (!ssl_cipher_disabled(sc, c, SSL_SECOP_CIPHER_SUPPORTED, 0)) {
+        if (!ssl_cipher_disabled(sc, c, SSL_SECOP_CIPHER_SUPPORTED)) {
             if (!sk)
                 sk = sk_SSL_CIPHER_new_null();
             if (!sk)
@@ -4263,6 +4259,17 @@ SSL_CTX *SSL_CTX_new_ex(OSSL_LIB_CTX *libctx, const char *propq,
             goto err;
     }
 
+    if ((ret->hmac = EVP_MAC_fetch(libctx, "HMAC", propq)) == NULL)
+        goto err;
+    if ((ret->sha256 = EVP_MD_fetch(libctx, "SHA2-256", propq)) == NULL)
+        goto err;
+    if ((ret->tktenc = EVP_CIPHER_fetch(libctx, "AES-256-CBC", propq)) == NULL)
+        goto err;
+#if defined(OPENSSL_HAVE_TLS1PRF)
+    if ((ret->tls1prf = EVP_KDF_fetch(libctx, OSSL_KDF_NAME_TLS1_PRF, propq)) == NULL)
+        goto err;
+#endif
+
     ret->method = meth;
     ret->min_proto_version = 0;
     ret->max_proto_version = 0;
@@ -4339,15 +4346,6 @@ SSL_CTX *SSL_CTX_new_ex(OSSL_LIB_CTX *libctx, const char *propq,
         ERR_raise(ERR_LIB_SSL, ERR_R_X509_LIB);
         goto err;
     }
-
-    /*
-     * If these aren't available from the provider we'll get NULL returns.
-     * That's fine but will cause errors later if SSLv3 is negotiated
-     */
-    ERR_set_mark();
-    ret->md5 = EVP_MD_fetch(libctx, "MD5", propq);
-    ret->sha1 = EVP_MD_fetch(libctx, "SHA1", propq);
-    ERR_pop_to_mark();
 
     if ((ret->ca_names = sk_X509_NAME_new_null()) == NULL) {
         ERR_raise(ERR_LIB_SSL, ERR_R_CRYPTO_LIB);
@@ -4590,6 +4588,13 @@ void SSL_CTX_free(SSL_CTX *a)
     if (a->sessions != NULL)
         SSL_CTX_flush_sessions_ex(a, 0);
 
+    EVP_MAC_free(a->hmac);
+    EVP_MD_free(a->sha256);
+    EVP_CIPHER_free(a->tktenc);
+#ifdef OPENSSL_HAVE_TLS1PRF
+    EVP_KDF_free(a->tls1prf);
+#endif
+
     CRYPTO_free_ex_data(CRYPTO_EX_INDEX_SSL_CTX, a, &a->ex_data);
     lh_SSL_SESSION_free(a->sessions);
     X509_STORE_free(a->cert_store);
@@ -4617,9 +4622,6 @@ void SSL_CTX_free(SSL_CTX *a)
     OPENSSL_free(a->ext.tuples);
     OPENSSL_free(a->ext.alpn);
     OPENSSL_secure_clear_free(a->ext.secure, sizeof(*a->ext.secure));
-
-    ssl_evp_md_free(a->md5);
-    ssl_evp_md_free(a->sha1);
 
     for (j = 0; j < SSL_ENC_NUM_IDX; j++)
         ssl_evp_cipher_free(a->ssl_cipher_methods[j]);
@@ -4819,10 +4821,13 @@ void ssl_set_masks(SSL_CONNECTION *s)
 
     /*
      * If we only have an RSA-PSS certificate allow RSA authentication
-     * if TLS 1.2 and peer supports it.
+     * if TLS 1.2 or DTLS 1.2 and peer supports it.
      */
 
-    if (rsa_enc || rsa_sign || (ssl_has_cert(s, SSL_PKEY_RSA_PSS_SIGN) && pvalid[SSL_PKEY_RSA_PSS_SIGN] & CERT_PKEY_EXPLICIT_SIGN && TLS1_get_version(&s->ssl) == TLS1_2_VERSION))
+    if (rsa_enc || rsa_sign
+        || (ssl_has_cert(s, SSL_PKEY_RSA_PSS_SIGN)
+            && pvalid[SSL_PKEY_RSA_PSS_SIGN] & CERT_PKEY_EXPLICIT_SIGN
+            && (SSL_version(&s->ssl) == XTLS(&s->ssl, 1, 2))))
         mask_a |= SSL_aRSA;
 
     if (dsa_sign) {
@@ -4841,7 +4846,7 @@ void ssl_set_masks(SSL_CONNECTION *s)
     }
     if (pvalid[SSL_PKEY_ECC] & CERT_PKEY_RPK)
         mask_a |= SSL_aECDSA;
-    if (TLS1_get_version(&s->ssl) == TLS1_2_VERSION) {
+    if (SSL_version(&s->ssl) == XTLS(&s->ssl, 1, 2)) {
         if (pvalid[SSL_PKEY_RSA_PSS_SIGN] & CERT_PKEY_RPK)
             mask_a |= SSL_aRSA;
         if (pvalid[SSL_PKEY_ED25519] & CERT_PKEY_RPK
@@ -4862,16 +4867,16 @@ void ssl_set_masks(SSL_CONNECTION *s)
         if (ecdsa_ok)
             mask_a |= SSL_aECDSA;
     }
-    /* Allow Ed25519 for TLS 1.2 if peer supports it */
+    /* Allow Ed25519 for TLS 1.2 and DTLS 1.2 if peer supports it */
     if (!(mask_a & SSL_aECDSA) && ssl_has_cert(s, SSL_PKEY_ED25519)
         && pvalid[SSL_PKEY_ED25519] & CERT_PKEY_EXPLICIT_SIGN
-        && TLS1_get_version(&s->ssl) == TLS1_2_VERSION)
+        && (SSL_version(&s->ssl) == XTLS(&s->ssl, 1, 2)))
         mask_a |= SSL_aECDSA;
 
-    /* Allow Ed448 for TLS 1.2 if peer supports it */
+    /* Allow Ed448 for TLS 1.2 and DTLS 1.2 if peer supports it */
     if (!(mask_a & SSL_aECDSA) && ssl_has_cert(s, SSL_PKEY_ED448)
         && pvalid[SSL_PKEY_ED448] & CERT_PKEY_EXPLICIT_SIGN
-        && TLS1_get_version(&s->ssl) == TLS1_2_VERSION)
+        && (SSL_version(&s->ssl) == XTLS(&s->ssl, 1, 2)))
         mask_a |= SSL_aECDSA;
 
     mask_k |= SSL_kECDHE;

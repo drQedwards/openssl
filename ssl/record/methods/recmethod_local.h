@@ -7,6 +7,9 @@
  * https://www.openssl.org/source/license.html
  */
 
+#if !defined(OSSL_SSL_RECORD_METHODS_RECMETHOD_LOCAL_H)
+#define OSSL_SSL_RECORD_METHODS_RECMETHOD_LOCAL_H
+
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -284,8 +287,7 @@ struct ossl_record_layer_st {
 
     /*
      * Do we need to send a prefix empty record before application data as a
-     * countermeasure against known-IV weakness (necessary for SSLv3 and
-     * TLSv1.0)
+     * countermeasure against known-IV weakness (necessary for TLSv1.0)
      */
     int need_empty_fragments;
 
@@ -322,9 +324,6 @@ struct ossl_record_layer_st {
     /* TLSv1.3 record padding */
     size_t block_padding;
     size_t hs_padding;
-
-    /* Only used by SSLv3 */
-    unsigned char mac_secret[EVP_MAX_MD_SIZE];
 
     /* TLSv1.0/TLSv1.1/TLSv1.2 */
     int use_etm;
@@ -534,3 +533,5 @@ int tls_write_records_default(OSSL_RECORD_LAYER *rl,
 #define TLS_BUFFER_is_app_buffer(b) ((b)->app_buffer)
 
 void ossl_tls_buffer_release(TLS_BUFFER *b);
+
+#endif /* !defined(OSSL_SSL_RECORD_METHODS_RECMETHOD_LOCAL_H) */

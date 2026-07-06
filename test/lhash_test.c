@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2025 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2017-2026 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright (c) 2017, Oracle and/or its affiliates.  All rights reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
@@ -31,6 +31,8 @@
 #endif
 
 DEFINE_LHASH_OF_EX(int);
+
+static void hashtable_intfree(HT_VALUE *v);
 
 static int int_tests[] = { 65537, 13, 1, 3, -5, 6, 7, 4, -10, -12, -14, 22, 9,
     -17, 16, 17, -23, 35, 37, 173, 11 };
@@ -302,6 +304,84 @@ static int test_int_hashtable(int idx)
 end:
     ossl_ht_free(ht);
     return rc;
+}
+
+/*
+ * MFAIL coverage for the RCU replacement branch of ossl_ht_insert_locked.
+ */
+static int test_hashtable_insert_replace_mfail(void)
+{
+    HT_CONFIG hash_conf = {
+        .collision_check = 1,
+        .no_rcu = 0, /* RCU enabled - exercises cbi pre-alloc on replace */
+    };
+    INTKEY key;
+    HT *ht = NULL;
+    int *old = NULL;
+    int ret = 0;
+    static int v1 = 100;
+    static int v2 = 200;
+
+    if (!TEST_ptr(ht = ossl_ht_new(&hash_conf)))
+        goto end;
+
+    /* Seed the table outside MFAIL for later replacement */
+    HT_INIT_KEY(&key);
+    HT_KEY_RESET(&key);
+    HT_SET_KEY_FIELD(&key, mykey, int_tests[0]);
+    if (!TEST_int_eq(ossl_ht_test_int_insert(ht, TO_HT_KEY(&key), &v1, NULL),
+            1))
+        goto end;
+
+    /* Replacement under MFAIL. */
+    MFAIL_start();
+    ret = ossl_ht_test_int_insert(ht, TO_HT_KEY(&key), &v2, &old);
+    MFAIL_end();
+
+end:
+    ossl_ht_free(ht);
+    return ret > 0 ? 1 : 0;
+}
+
+static int test_hashtable_free_mfail(void)
+{
+    HT_CONFIG hash_conf = {
+        .ht_free_fn = hashtable_intfree,
+        .collision_check = 1,
+        .no_rcu = 0,
+    };
+    INTKEY key;
+    HT *ht = NULL;
+    int *p;
+    size_t i;
+
+    if (!TEST_ptr(ht = ossl_ht_new(&hash_conf)))
+        return 0;
+
+    /* Seed values. */
+    HT_INIT_KEY(&key);
+    for (i = 0; i < n_int_tests; i++) {
+        if (!TEST_ptr(p = OPENSSL_malloc(sizeof(*p))))
+            goto end;
+        *p = int_tests[i];
+        HT_KEY_RESET(&key);
+        HT_SET_KEY_FIELD(&key, mykey, *p);
+        if (!TEST_int_eq(ossl_ht_test_int_insert(ht, TO_HT_KEY(&key),
+                             p, NULL),
+                1)) {
+            OPENSSL_free(p);
+            goto end;
+        }
+    }
+    MFAIL_start();
+    ossl_ht_free(ht);
+    MFAIL_end();
+    ht = NULL;
+
+    return 1;
+end:
+    ossl_ht_free(ht);
+    return 0;
 }
 
 static unsigned long int stress_hash(const int *p)
@@ -799,5 +879,7 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_int_hashtable, 2);
     ADD_ALL_TESTS(test_hashtable_stress, 4);
     ADD_ALL_TESTS(test_hashtable_multithread, 2);
+    ADD_MFAIL_TEST(test_hashtable_insert_replace_mfail);
+    ADD_MFAIL_NO_CHECK_TEST(test_hashtable_free_mfail);
     return 1;
 }

@@ -688,10 +688,41 @@ static WRITE_TRAN ossl_statem_server13_write_transition(SSL_CONNECTION *s)
             st->hand_state = TLS_ST_OK;
             return WRITE_TRAN_CONTINUE;
         }
-        if (s->num_tickets > s->sent_tickets)
-            st->hand_state = TLS_ST_SW_SESSION_TICKET;
-        else
+        /*
+         * Do not issue TLS 1.3 session tickets if the server has explicitly
+         * disabled them via SSL_OP_NO_TICKET and also disabled the session
+         * cache with SSL_SESS_CACHE_OFF. Together, these settings clearly
+         * indicate an intent to suppress session resumption; sending
+         * NewSessionTicket messages in this case would be wasteful and
+         * misleading.
+         *
+         * From the server’s perspective, a client that does not advertise
+         * psk_key_exchange_modes in TLS 1.3, or that sends it with RFC 9149
+         * parameters such as new_session_count = 0 or resumption_count = 0, is
+         * effectively signaling no interest in session tickets or resumption.
+         *
+         * RFC 8446 section 4.2.9: Servers MUST NOT select a key exchange mode
+         * that is not listed by the client. This extension also restricts the
+         * modes for use with PSK resumption. Servers SHOULD NOT send
+         * NewSessionTicket with tickets that are not compatible with the
+         * advertised modes; however, if a server does so, the impact will just
+         * be that the client's attempts at resumption fail.
+         *
+         * Note: Although RFC 9149 allows clients to signal no interest in
+         * session tickets or resumption (e.g. new_session_count = 0 or
+         * resumption_count = 0), this implementation does not currently
+         * interpret or enforce those parameters.
+         */
+        if (((s->options & SSL_OP_NO_TICKET) != 0
+                && (SSL_CONNECTION_GET_CTX(s)->session_cache_mode & SSL_SESS_CACHE_SERVER)
+                    == 0)
+            || s->ext.psk_kex_mode == TLSEXT_KEX_MODE_FLAG_NONE) {
             st->hand_state = TLS_ST_OK;
+        } else if (s->num_tickets > s->sent_tickets) {
+            st->hand_state = TLS_ST_SW_SESSION_TICKET;
+        } else {
+            st->hand_state = TLS_ST_OK;
+        }
         return WRITE_TRAN_CONTINUE;
 
     case TLS_ST_SR_KEY_UPDATE:
@@ -2156,6 +2187,19 @@ static int tls_early_post_process_client_hello(SSL_CONNECTION *s)
             s->peer_ciphers = ciphers;
             s->session->verify_result = X509_V_OK;
 
+            /*
+             * Per RFC 4851, Section 3.2.2:
+             * If the ClientHello contains both a Session ID and a PAC-Opaque in
+             * the SessionTicket extension, and the server resumes the session
+             * using the PAC-Opaque, it should echo the same Session ID in the
+             * ServerHello.
+             */
+            if (clienthello->session_id_len > 0) {
+                memcpy(s->session->session_id, clienthello->session_id,
+                    clienthello->session_id_len);
+                s->session->session_id_length = clienthello->session_id_len;
+            }
+
             ciphers = NULL;
 
             /* check if some cipher was preferred by call back */
@@ -2505,18 +2549,6 @@ WORK_STATE tls_post_process_client_hello(SSL_CONNECTION *s, WORK_STATE wst)
             /* Session-id reuse */
             s->s3.tmp.new_cipher = s->session->cipher;
         }
-
-        /*-
-         * we now have the following setup.
-         * client_random
-         * cipher_list          - our preferred list of ciphers
-         * ciphers              - the client's preferred list of ciphers
-         * compression          - basically ignored right now
-         * ssl version is set   - sslv3
-         * s->session           - The ssl session has been setup.
-         * s->hit               - session reuse flag
-         * s->s3.tmp.new_cipher - the new cipher to use.
-         */
 
         /*
          * Call status_request callback if needed. Has to be done after the
@@ -4247,7 +4279,7 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
 {
     unsigned char *senc = NULL;
     EVP_CIPHER_CTX *ctx = NULL;
-    SSL_HMAC *hctx = NULL;
+    SSL_HMAC hctx, *constructed_hctx = NULL;
     unsigned char *p, *encdata1, *encdata2, *macdata1, *macdata2;
     const unsigned char *const_p;
     int len, slen_full, slen, lenfinal;
@@ -4283,8 +4315,7 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_EVP_LIB);
         goto err;
     }
-    hctx = ssl_hmac_new(tctx);
-    if (hctx == NULL) {
+    if ((constructed_hctx = ssl_hmac_construct(tctx, &hctx)) == NULL) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_SSL_LIB);
         goto err;
     }
@@ -4335,13 +4366,13 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
 
         if (tctx->ext.ticket_key_evp_cb != NULL)
             ret = tctx->ext.ticket_key_evp_cb(ssl, key_name, iv, ctx,
-                ssl_hmac_get0_EVP_MAC_CTX(hctx),
+                ssl_hmac_get0_EVP_MAC_CTX(&hctx),
                 1);
 #ifndef OPENSSL_NO_DEPRECATED_3_0
         else if (tctx->ext.ticket_key_cb != NULL)
             /* if 0 is returned, write an empty ticket */
             ret = tctx->ext.ticket_key_cb(ssl, key_name, iv, ctx,
-                ssl_hmac_get0_HMAC_CTX(hctx), 1);
+                ssl_hmac_get0_HMAC_CTX(&hctx), 1);
 #endif
 
         if (ret == 0) {
@@ -4362,7 +4393,7 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
             }
             OPENSSL_free(senc);
             EVP_CIPHER_CTX_free(ctx);
-            ssl_hmac_free(hctx);
+            ssl_hmac_destruct(constructed_hctx);
             return CON_FUNC_SUCCESS;
         }
         if (ret < 0) {
@@ -4375,28 +4406,17 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
             goto err;
         }
     } else {
-        EVP_CIPHER *cipher = EVP_CIPHER_fetch(sctx->libctx, "AES-256-CBC",
-            sctx->propq);
-
-        if (cipher == NULL) {
-            /* Error is already recorded */
-            SSLfatal_alert(s, SSL_AD_INTERNAL_ERROR);
-            goto err;
-        }
-
-        iv_len = EVP_CIPHER_get_iv_length(cipher);
+        iv_len = EVP_CIPHER_get_iv_length(sctx->tktenc);
         if (iv_len < 0
             || RAND_bytes_ex(sctx->libctx, iv, iv_len, 0) <= 0
-            || !EVP_EncryptInit_ex(ctx, cipher, NULL,
+            || !EVP_EncryptInit_ex(ctx, sctx->tktenc, NULL,
                 tctx->ext.secure->tick_aes_key, iv)
-            || !ssl_hmac_init(hctx, tctx->ext.secure->tick_hmac_key,
+            || !ssl_hmac_init(&hctx, tctx->ext.secure->tick_hmac_key,
                 sizeof(tctx->ext.secure->tick_hmac_key),
                 "SHA256")) {
-            EVP_CIPHER_free(cipher);
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
             goto err;
         }
-        EVP_CIPHER_free(cipher);
         memcpy(key_name, tctx->ext.tick_key_name,
             sizeof(tctx->ext.tick_key_name));
     }
@@ -4422,11 +4442,11 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
         || encdata1 + len != encdata2
         || len + lenfinal > slen + EVP_MAX_BLOCK_LENGTH
         || !WPACKET_get_total_written(pkt, &macendoffset)
-        || !ssl_hmac_update(hctx,
+        || !ssl_hmac_update(&hctx,
             (unsigned char *)s->init_buf->data + macoffset,
             macendoffset - macoffset)
         || !WPACKET_reserve_bytes(pkt, EVP_MAX_MD_SIZE, &macdata1)
-        || !ssl_hmac_final(hctx, macdata1, &hlen, EVP_MAX_MD_SIZE)
+        || !ssl_hmac_final(&hctx, macdata1, &hlen, EVP_MAX_MD_SIZE)
         || hlen > EVP_MAX_MD_SIZE
         || !WPACKET_allocate_bytes(pkt, hlen, &macdata2)
         || macdata1 != macdata2) {
@@ -4444,7 +4464,7 @@ static CON_FUNC_RETURN construct_stateless_ticket(SSL_CONNECTION *s,
 err:
     OPENSSL_free(senc);
     EVP_CIPHER_CTX_free(ctx);
-    ssl_hmac_free(hctx);
+    ssl_hmac_destruct(constructed_hctx);
     return ok;
 }
 

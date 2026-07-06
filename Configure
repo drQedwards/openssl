@@ -222,16 +222,9 @@ our $BSDthreads="-pthread -D_THREAD_SAFE -D_REENTRANT";
 #
 # API compatibility name to version number mapping.
 #
+
+# This table expresses when API additions or changes can occur
 my $apitable = {
-    # This table expresses when API additions or changes can occur.
-    # The numbering used changes from 3.0 and on because we updated
-    # (solidified) our version numbering scheme at that point.
-
-    # From 3.0 and on, we internalise the given version number in decimal
-    # as MAJOR * 10000 + MINOR * 100 + 0
-    "3.0.0" => 30000,
-    "3.0"   => 30000,
-
     # Note that before 3.0, we didn't have the same version number scheme.
     # Still, the numbering we use here covers what we need.
     "1.1.1" => 10101,
@@ -241,6 +234,19 @@ my $apitable = {
     "1.0.0" => 10000,
     "0.9.8" =>   908,
 };
+
+# From 3.0 and on, we internalise the given version number in decimal
+# as MAJOR * 10000 + MINOR * 100 + 0
+my @post30_versions = ([3, 0], [3, 1], [3, 2], [3, 3], [3, 4], [3, 5], [3, 6],
+                       [4, 0], [4, 1],
+                       );
+
+# The numbering used changes from 3.0 and on because we updated
+# (solidified) our version numbering scheme at that point.
+foreach (@post30_versions) {
+    my ($x, $y) = @{$_};
+    $apitable->{"$x.$y.0"} = $apitable->{"$x.$y"} = $x * 10000 + $y * 100;
+}
 
 # For OpenSSL::config::get_platform
 my %guess_opts = ();
@@ -505,7 +511,6 @@ my @disablables_features = (
     "asan",
     "asm",
     "async",
-    "atexit",
     "autoalginit",
     "autoerrinit",
     "autoload-config",
@@ -518,6 +523,7 @@ my @disablables_features = (
     "crypto-mdebug",
     "allocfail-tests",
     "ct",
+    "ct-validation",
     "default-thread-pool",
     "demos",
     "h3demo",
@@ -589,6 +595,7 @@ my @disablables_int = qw(
     );
 
 my %deprecated_disablables = (
+    "atexit" => undef,
     "engine" => undef,
     "static-engine" => undef,
     "dynamic-engine" => undef,
@@ -612,6 +619,7 @@ my %deprecated_disablables = (
 # All of the following are disabled by default:
 
 our %disabled = ( # "what"         => "comment"
+                  "atexit"              => "default",
                   "fips"                => "default",
                   "fips-jitter"         => "default",
                   "asan"                => "default",
@@ -620,6 +628,7 @@ our %disabled = ( # "what"         => "comment"
                   "buildtest-c++"       => "default",
                   "crypto-mdebug"       => "default",
                   "allocfail-tests"     => "default",
+                  "ct-validation"       => "default",
                   "demos"               => "default",
                   "h3demo"              => "default",
                   "hqinterop"           => "default",
@@ -656,7 +665,7 @@ our %disabled = ( # "what"         => "comment"
 my @disable_cascades = (
     # "what"            => [ "cascade", ... ]
     "bulk"              => [ "shared", "dso",
-                             "argon2", "aria", "async", "atexit", "autoload-config",
+                             "argon2", "aria", "async", "autoload-config",
                              "blake2", "bf", "camellia", "cast", "chacha",
                              "cmac", "cms", "cmp", "comp", "ct",
                              "des", "dgram", "dh", "dsa",
@@ -1618,12 +1627,12 @@ unless ($disabled{threads}) {
     }
 }
 
-# Find out if clang's sanitizers have been enabled with -fsanitize
-# flags and ensure that the corresponding %disabled elements area
-# removed to reflect that the sanitizers are indeed enabled.
+# Find out if clang's sanitizers have been enabled with -fsanitize (or
+# /fsanitize for VC targets) flags and ensure that the corresponding %disabled
+# elements area removed to reflect that the sanitizers are indeed enabled.
 my %detected_sanitizers = ();
-foreach (grep /^-fsanitize=/, @{$config{CFLAGS} || []}) {
-    (my $checks = $_) =~ s/^-fsanitize=//;
+foreach (grep { /^[-\/]fsanitize=/ } @{$config{CFLAGS} || []}) {
+    (my $checks = $_) =~ s|^[-/]fsanitize=||;
     foreach (split /,/, $checks) {
         my $d = { address       => 'asan',
                   undefined     => 'ubsan',
@@ -1658,7 +1667,8 @@ if (($target{shared_target} // '') eq "")
         }
 
 unless ($disabled{asan} || defined $detected_sanitizers{asan}) {
-    push @{$config{cflags}}, "-fsanitize=address";
+    push @{$config{cflags}},
+        $config{target} =~ /^VC-/ ? "/fsanitize=address" : "-fsanitize=address";
 }
 
 unless ($disabled{ubsan} || defined $detected_sanitizers{ubsan}) {
@@ -1671,8 +1681,50 @@ unless ($disabled{msan} || defined $detected_sanitizers{msan}) {
 
 unless ($disabled{"fuzz-libfuzzer"} && $disabled{"fuzz-afl"}
         && $disabled{asan} && $disabled{ubsan} && $disabled{msan}) {
-    push @{$config{cflags}}, "-fno-omit-frame-pointer", "-g";
-    push @{$config{cxxflags}}, "-fno-omit-frame-pointer", "-g" if $config{CXX};
+    unless ($config{target} =~ /^VC-/) {
+        push @{$config{cflags}}, "-fno-omit-frame-pointer", "-g";
+        push @{$config{cxxflags}}, "-fno-omit-frame-pointer", "-g" if $config{CXX};
+    }
+}
+
+# Valgrind-based constant-time validation: marks secret data as "undefined"
+# to Valgrind's memcheck tool, so that any control flow or memory indexing
+# that depends on secret data is flagged as an error.  Requires valgrind
+# headers at build time and running the tests under valgrind at test time.
+# Use |make TESTS="test_internal_ml_kem test_internal_ml_dsa" test| under
+# valgrind after building with this option.
+#
+# Package names for the required valgrind headers:
+#   Debian/Ubuntu  : valgrind          (headers bundled in the main package)
+#   Fedora/RHEL    : valgrind-devel
+#   Alpine         : valgrind-dev
+#   Arch Linux     : valgrind
+unless ($disabled{"ct-validation"}) {
+    # Probe for <valgrind/memcheck.h> so that we give a clear error here
+    # rather than a cryptic compile failure inside constant_time.h later.
+    my $cc = ($config{CROSS_COMPILE} // "").$config{CC};
+    my $probe_src = "ct_valgrind_probe_$$.c";
+    my $probe_obj = "ct_valgrind_probe_$$.o";
+    open(my $fh, ">", $probe_src)
+        or die "Cannot write probe file '$probe_src': $!";
+    print $fh "#include <valgrind/memcheck.h>\n";
+    close($fh);
+    my $probe_ok = (system("$cc -c -o $probe_obj $probe_src 2>/dev/null") == 0);
+    unlink($probe_src, $probe_obj);
+    if (!$probe_ok) {
+        die <<EOT;
+
+***** enable-ct-validation requires <valgrind/memcheck.h> at build time,
+***** but the header was not found by '$cc'.
+*****
+***** Install the appropriate package and re-run Configure:
+*****   Debian/Ubuntu : sudo apt-get install valgrind
+*****   Fedora/RHEL   : sudo dnf install valgrind-devel
+*****   Alpine        : sudo apk add valgrind-dev
+*****   Arch Linux    : sudo pacman -S valgrind
+EOT
+    }
+    push @{$config{openssl_feature_defines}}, "OPENSSL_CONSTANT_TIME_VALIDATION";
 }
 #
 # Platform fix-ups
